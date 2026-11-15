@@ -11,16 +11,20 @@ limit is reached.
 
 Five model-facing tools:
 
-- `roles_run` — the full team loop on one self-contained task. PLAN writes the
-  plan, WORKER implements it in the shared workspace, ADVISOR audits every
-  worker attempt, and REVIEWER runs only after WORKER reports completion and
-  ADVISOR approves. Rejected attempts go back to WORKER with the concrete
-  issues. Returns the plan, every attempt, every verdict and the final status.
+- `roles_run` — the full team loop on one self-contained task. PLAN drafts a
+  rigorous plan, the ADVISOR audits that plan before WORKER starts (a rejected
+  plan is revised from the advisor's issues), WORKER implements it in the
+  shared workspace, ADVISOR audits every worker attempt, and REVIEWER is the
+  final gate whose approval is the only approved outcome. When the rounds run
+  out without approval the run asks the user how to proceed: continue without
+  approval, try three more rounds, change the WORKER model (with a model
+  choice), or stop. Returns the plan, every attempt, every verdict, the user's
+  decisions and the final status.
 - `role_plan`, `role_worker`, `role_advisor`, `role_reviewer` — run a single role
   once and return its report. Useful when the lead wants one plan, one audit or
   one final review without the whole loop.
 
-One human command:
+Two human commands:
 
 - `/roles` — show the routes and their sources.
 - `/roles set <role> <provider>/<model>[:effort]` — validate the route against
@@ -32,6 +36,12 @@ One human command:
 - `/roles doctor` — validate every route and warn when the worker, advisor and
   reviewer are not from independent model families.
 - `/roles run <task>` — run the full team directly from the command surface.
+- `/role-plan <task or plan.md>` — start the full role-team process on demand,
+  instead of the lead agent's ordinary execution. With a task, PLAN writes the
+  plan; with a path to a Markdown plan file (for example a Jev plan artifact,
+  resolved against the session workspace), the plan is read from the file and
+  PLAN is skipped. The command drives the complete pipeline and returns the
+  team's report.
 
 ## Default routes
 
@@ -66,6 +76,7 @@ a provider is not configured. The plugin also accepts `roles` in
       advisor: { provider: zai, model: glm-5.3 }
       reviewer: { provider: openai-codex, model: gpt-6-sol }
     maxRounds: 3       # worker attempts per run, 1-6
+    maxPlanPasses: 2   # ADVISOR plan-audit passes before WORKER, 1-3
     childMaxDepth: 2   # delegation depth available to role children
     prompts:           # optional extra instructions per role
       worker: 'Prefer the repository conventions over new abstractions.'
@@ -116,26 +127,59 @@ configuration editor; without it, edit the `role-team` row in
 
 ## How the loop works
 
-1. **PLAN** receives the task verbatim plus optional context and returns an
-   ordered plan with files, risks, verification commands and acceptance checks.
-2. **WORKER** receives the task, the plan, and the outstanding advisor/reviewer
+1. **PLAN** receives the task verbatim plus optional context and returns a plan
+   with four labeled parts: `STEPS` (each naming the exact file or module path
+   and the concrete change), `RISKS` (named risks and edge cases, each stating
+   what to verify), `VERIFY` (the exact commands that prove completion) and
+   `ACCEPT` (acceptance checks an independent reviewer can verify).
+2. **Plan audit** — the ADVISOR audits the plan itself before any WORKER
+   attempt. A rejected plan goes back to PLAN with the advisor's issues
+   (bounded by `maxPlanPasses`, default 2); issues that survive every pass are
+   carried into the WORKER prompt.
+3. **WORKER** receives the task, the plan, and the outstanding advisor/reviewer
    feedback. It runs as a fresh agent with the caller's normal tools, edits the
    shared workspace, runs checks, and must end with `CHANGES:`, `EVIDENCE:`,
    `STATUS: done|blocked` and `NOTES:`.
-3. **ADVISOR** inspects the real workspace and diff from a different model
+4. **ADVISOR** inspects the real workspace and diff from a different model
    family. It returns strict JSON: `approved`, `summary`, `issues[]`. A
    rejection feeds every issue into the next WORKER attempt.
-4. **REVIEWER** runs only after ADVISOR approves. It verifies the diff and tests
+5. **REVIEWER** runs only after ADVISOR approves. It verifies the diff and tests
    from scratch, with the plan, the worker report and the advisor verdict, and
    returns the same strict JSON. A rejection also returns to WORKER and the
-   loop repeats.
-5. The run ends as **APPROVED** when the reviewer approves, or **NOT APPROVED**
-   after the configured number of worker attempts, with the outstanding
-   feedback listed and an instruction to fix it and rerun.
+   loop repeats. The REVIEWER's approval is the run's only APPROVED verdict.
+6. When the rounds are exhausted without approval, the run asks the user how to
+   proceed — continue without approval, try three more rounds, change the
+   WORKER model (followed by a model choice from the live catalogue), or stop.
+   Extra rounds respect a hard cap of 12 total worker attempts; the decision is
+   recorded in the report. Without an interactive answerer the run ends
+   NOT APPROVED with a note.
+7. The report is verdict-first: the status header, then the labeled ADVISOR and
+   REVIEWER comment sections (each with the stage's route), then the plan, the
+   round-by-round detail, and the user's decisions.
 
 The same gate applies to the standalone tools: `role_reviewer` refuses to start
 until `role_worker` (or a `roles_run` worker) has reported completion in that
 session, so the gate cannot be used as a first reviewer by accident.
+
+## Role cards in the chat timeline
+
+The browser half registers dedicated cards for the five role tools in the chat
+timeline (keyed `tool.call.toolview` rows):
+
+- a role badge with the stage's provider/model route, and a status pill
+  (running, approved, changes required, continued without approval, failed);
+- while a run is in flight, the card polls the live run state
+  (`GET /plugin-api/role-team/run/<callId>`, loopback-guarded) and shows the
+  pipeline with the currently active role highlighted;
+- once settled, the card reads the structured metadata persisted with the tool
+  result and renders the ADVISOR and REVIEWER comments — verdict, summary and
+  each issue with its severity — plus the user's exhaustion decisions, with the
+  raw report behind a disclosure. When the metadata is absent (for example an
+  older result), the card falls back to the raw report text.
+
+The structured results also remain inspectable in the Trajectory view's Result
+inspector, which shows the canonical value (stages, comments, decisions) next
+to the rendered report.
 
 Role children are started with caller delivery, so they do not send completion
 notices into the lead's inbox; the tool result contains the complete report.
@@ -195,7 +239,9 @@ node --test test/*.test.js
 ```
 
 The suite uses a fake Host context and canned role outputs: it checks config
-parsing, route validation failures, the four-role order, feedback propagation,
-the reviewer gate, `/roles set`/`reset` persistence, family warnings, the
-Settings snapshot, and the settings route's GET/POST/reset and admission
-checks.
+parsing, route validation failures, the plan-audit order and revision, the
+strict pipeline order, feedback propagation, the reviewer gate, the four
+exhaustion choices and their hard cap, `/role-plan` (task and plan-file forms),
+`/roles set`/`reset` persistence, family warnings, the structured presentation
+metadata, the live run-state route, the Settings snapshot, and the settings
+route's GET/POST/reset and admission checks.

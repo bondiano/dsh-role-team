@@ -1,15 +1,23 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   apply,
+  buildPlanAuditPrompt,
+  buildPlanPrompt,
   familyOf,
   formatRoute,
+  handleRolePlanCommand,
   handleRolesRoute,
+  handleRunStateRequest,
   normalizeRoute,
   parseVerdict,
   resolveRoleTeamConfig,
   roleTeamSnapshot,
+  runStateOf,
 } from '../index.js'
 
 const AGENT = { session: { id: 'session-1' } }
@@ -17,7 +25,7 @@ const SIGNAL = new AbortController().signal
 
 /**
  * Build a fake Host context with the services the plugin consumes.
- * @param {{ config?: object, responses?: Record<string, string[] | ((prompt: string, index: number) => string)>, llm?: object }} options harness options
+ * @param {{ config?: object, responses?: Record<string, string[] | ((prompt: string, index: number) => string)>, llm?: object, userAnswers?: Record<string, string> | ((id: string) => string), cwd?: string }} options harness options
  * @returns {object} fake harness
  */
 function makeHarness(options = {}) {
@@ -44,6 +52,7 @@ function makeHarness(options = {}) {
         let reply
         if (typeof queue === 'function') reply = queue(prompt, index)
         else if (Array.isArray(queue)) reply = queue[index - 1]
+        if (typeof reply === 'function') reply = reply(prompt, index)
         const text = reply ?? `default ${role} ${index}`
         return {
           name: request.name,
@@ -68,7 +77,7 @@ function makeHarness(options = {}) {
         return [{ id: `${provider}-model`, name: `${provider} model` }]
       },
     },
-    workingDirectory: { get: () => '/workspace' },
+    workingDirectory: { get: () => options.cwd ?? '/workspace' },
     configEditor: {
       async edit(targetEntry, change) {
         targetEntry.options.config = change(targetEntry.options.config)
@@ -80,6 +89,20 @@ function makeHarness(options = {}) {
         return () => commands.delete(definition.name)
       },
     },
+  }
+  if (options.userAnswers !== undefined) {
+    services.userQuestions = {
+      async ask(request) {
+        const questions = Array.isArray(request.questions) ? request.questions : []
+        const answers = questions.map(question => {
+          const label = typeof options.userAnswers === 'function'
+            ? options.userAnswers(question.id)
+            : options.userAnswers[question.id]
+          return { id: question.id, selected: typeof label === 'string' && label !== '' ? [label] : [] }
+        })
+        return { answers }
+      },
+    }
   }
   const ctx = {
     fiber: { entry },
@@ -126,6 +149,7 @@ test('resolveRoleTeamConfig applies defaults, overrides and inheritance', () => 
   assert.deepEqual(defaults.roles.plan, { provider: 'opencode-go', model: 'gpt-6-luna' })
   assert.equal(defaults.sources.plan, 'default')
   assert.equal(defaults.maxRounds, 3)
+  assert.equal(defaults.maxPlanPasses, 2)
   assert.equal(defaults.childMaxDepth, 2)
 
   const custom = resolveRoleTeamConfig({
@@ -135,6 +159,7 @@ test('resolveRoleTeamConfig applies defaults, overrides and inheritance', () => 
       reviewer: { provider: 'anthropic', model: 'claude-opus-5', reasoningEffort: 'high' },
     },
     maxRounds: 5,
+    maxPlanPasses: 9,
     childMaxDepth: 3,
     prompts: { worker: '  be terse  ', unknown: 'ignored' },
   })
@@ -143,6 +168,7 @@ test('resolveRoleTeamConfig applies defaults, overrides and inheritance', () => 
   assert.equal(custom.sources.advisor, 'inherit')
   assert.deepEqual(custom.roles.reviewer, { provider: 'anthropic', model: 'claude-opus-5', reasoningEffort: 'high' })
   assert.equal(custom.maxRounds, 5)
+  assert.equal(custom.maxPlanPasses, 3)
   assert.equal(custom.childMaxDepth, 3)
   assert.deepEqual(custom.prompts, { worker: 'be terse' })
 
@@ -204,15 +230,16 @@ test('parseVerdict prefers strict JSON and never approves on a stray word', () =
   assert.equal(parseVerdict('').approved, false)
 })
 
-test('roles_run runs PLAN, then WORKER/ADVISOR twice and REVIEWER only after advisor approval', async () => {
+test('roles_run audits the plan, revises it, and gates REVIEWER behind ADVISOR', async () => {
   const harness = makeHarness({
     responses: {
-      plan: ['1. Implement X\n2. Test X'],
-      worker: ['CHANGES: first\nSTATUS: done', 'CHANGES: second\nSTATUS: done', 'CHANGES: third\nSTATUS: done'],
+      plan: ['STEPS:\n1. Implement X\nVERIFY: npm test', 'STEPS:\n1. Implement X (revised)\nVERIFY: npm test'],
+      worker: ['CHANGES: first\nSTATUS: done', 'CHANGES: second\nSTATUS: done'],
       advisor: [
-        verdict(false, [{ severity: 'blocker', detail: 'first blocker' }]),
-        verdict(true, [], 'looks right'),
-        verdict(true, [], 'still right'),
+        verdict(false, [{ severity: 'blocker', detail: 'plan misses tests' }]),
+        verdict(true, [], 'plan is good'),
+        verdict(true, [], 'work is right'),
+        verdict(true, [], 'work is right again'),
       ],
       reviewer: [
         verdict(false, [{ severity: 'major', detail: 'second issue' }]),
@@ -224,32 +251,32 @@ test('roles_run runs PLAN, then WORKER/ADVISOR twice and REVIEWER only after adv
     { task: 'Implement X and prove it' },
     { agent: AGENT, signal: SIGNAL },
   )
-  assert.match(outcome.text, /Role team: APPROVED after 3 round\(s\)/)
-  assert.equal(harness.calls.filter(call => call.role === 'plan').length, 1)
-  assert.equal(harness.calls.filter(call => call.role === 'worker').length, 3)
-  assert.equal(harness.calls.filter(call => call.role === 'advisor').length, 3)
+  assert.equal(outcome.status, 'approved')
+  assert.match(outcome.text, /Role team: APPROVED after 2 round\(s\)/)
+  assert.equal(harness.calls.filter(call => call.role === 'plan').length, 2)
+  assert.equal(harness.calls.filter(call => call.role === 'worker').length, 2)
   assert.equal(harness.calls.filter(call => call.role === 'reviewer').length, 2)
 
   const roles = harness.calls.map(call => call.role)
-  assert.deepEqual(roles.slice(0, 3), ['plan', 'worker', 'advisor'])
-  assert.deepEqual(roles.slice(3, 6), ['worker', 'advisor', 'reviewer'])
-  assert.deepEqual(roles.slice(6), ['worker', 'advisor', 'reviewer'])
+  assert.deepEqual(roles, ['plan', 'advisor', 'plan', 'advisor', 'worker', 'advisor', 'reviewer', 'worker', 'advisor', 'reviewer'])
 
   const workers = harness.calls.filter(call => call.role === 'worker')
-  assert.ok(!workers[0].prompt.includes('first blocker'))
-  assert.ok(workers[1].prompt.includes('[blocker] first blocker'))
-  assert.ok(workers[2].prompt.includes('[major] second issue'))
+  assert.ok(!workers[0].prompt.includes('plan misses tests'))
+  assert.ok(workers[1].prompt.includes('[major] second issue'))
 
-  const reviewers = harness.calls.filter(call => call.role === 'reviewer')
-  assert.ok(reviewers[0].prompt.includes('CHANGES: second'))
-  assert.ok(reviewers[0].prompt.includes('first blocker') === false)
+  const planCalls = harness.calls.filter(call => call.role === 'plan')
+  assert.ok(planCalls[1].prompt.includes('plan misses tests'))
+
+  assert.match(outcome.text, /ADVISOR AND REVIEWER COMMENTS/)
+  assert.match(outcome.text, /plan audit 1/)
+  assert.match(outcome.text, /REVIEWER \(opencode-go\/qwen3\.8-max\) — round 2 final gate — APPROVED/)
 })
 
-test('roles_run with a supplied plan skips PLAN and still gates on REVIEWER', async () => {
+test('roles_run with a supplied plan skips PLAN, audits the plan, and gates on REVIEWER', async () => {
   const harness = makeHarness({
     responses: {
       worker: ['CHANGES: done\nSTATUS: done'],
-      advisor: [verdict(true, [], 'approved')],
+      advisor: [verdict(true, [], 'plan ok'), verdict(true, [], 'work ok')],
       reviewer: [verdict(true, [], 'approved')],
     },
   })
@@ -258,9 +285,38 @@ test('roles_run with a supplied plan skips PLAN and still gates on REVIEWER', as
     { agent: AGENT, signal: SIGNAL },
   )
   assert.match(outcome.text, /APPROVED/)
-  assert.equal(harness.calls.filter(call => call.role === 'plan').length, 0)
-  assert.equal(harness.calls.filter(call => call.role === 'reviewer').length, 1)
+  const roles = harness.calls.map(call => call.role)
+  assert.deepEqual(roles, ['advisor', 'worker', 'advisor', 'reviewer'])
   assert.match(outcome.text, /Fix the bug/)
+})
+
+test('plan issues that survive every audit pass reach the WORKER prompt', async () => {
+  const harness = makeHarness({
+    responses: {
+      plan: ['STEPS:\n1. Do it', 'STEPS:\n1. Do it better'],
+      worker: ['CHANGES: done\nSTATUS: done'],
+      advisor: [
+        verdict(false, [{ severity: 'blocker', detail: 'no verification commands' }]),
+        verdict(false, [{ severity: 'major', detail: 'acceptance checks missing' }]),
+        verdict(true, [], 'work ok'),
+      ],
+      reviewer: [verdict(true, [], 'approved')],
+    },
+  })
+  await harness.tools.get('roles_run').execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  const worker = harness.calls.find(call => call.role === 'worker')
+  assert.ok(worker.prompt.includes('acceptance checks missing'))
+})
+
+test('the PLAN prompt demands the four labeled plan parts', () => {
+  const prompt = buildPlanPrompt({ task: 'Build the feature', cwd: '/w' })
+  for (const part of ['STEPS:', 'RISKS:', 'VERIFY:', 'ACCEPT:']) {
+    assert.ok(prompt.includes(part), `the prompt is missing ${part}`)
+  }
+  assert.ok(prompt.includes('exact file or module path'))
+  const auditPrompt = buildPlanAuditPrompt({ task: 'Build the feature', plan: '1. Do it', cwd: '/w' })
+  assert.ok(auditPrompt.includes('auditing the PLAN'))
+  assert.ok(auditPrompt.includes('good enough to implement'))
 })
 
 test('roles_run refuses an invalid configured role before starting any child', async () => {
@@ -431,4 +487,237 @@ test('the settings route rejects cross-site and unknown-role writes', async () =
     body: JSON.stringify({ role: 'nope', route: { provider: 'zai', model: 'glm-5.3' } }),
   }), {})
   assert.equal(unknown.status, 400)
+})
+
+test('exhaustion asks the user and honors retry, continue, stop and model choices', async () => {
+  const retry = makeHarness({
+    config: { maxRounds: 1 },
+    userAnswers: { exhaustion: 'Try 3 more rounds' },
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      worker: ['CHANGES: one\nSTATUS: done', 'CHANGES: two\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(false, [{ severity: 'major', detail: 'not done' }]), verdict(true, [], 'ok now')],
+      reviewer: [verdict(true, [], 'approved')],
+    },
+  })
+  const retryOutcome = await retry.tools.get('roles_run').execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(retryOutcome.status, 'approved')
+  assert.equal(retry.calls.filter(call => call.role === 'worker').length, 2)
+  assert.match(retryOutcome.text, /DECISIONS/)
+  assert.match(retryOutcome.text, /- retry/)
+  assert.deepEqual(retryOutcome.decisions.map(decision => decision.choice), ['retry'])
+
+  const continued = makeHarness({
+    config: { maxRounds: 1 },
+    userAnswers: { exhaustion: 'Continue without approval' },
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      worker: ['CHANGES: one\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(false, [{ severity: 'major', detail: 'still broken' }])],
+    },
+  })
+  const continuedOutcome = await continued.tools.get('roles_run').execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(continuedOutcome.status, 'continued')
+  assert.match(continuedOutcome.text, /CONTINUED WITHOUT APPROVAL/)
+  assert.match(continuedOutcome.text, /still broken/)
+  assert.match(continuedOutcome.text, /- continue/)
+
+  const stopped = makeHarness({
+    config: { maxRounds: 1 },
+    userAnswers: { exhaustion: 'Stop' },
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      worker: ['CHANGES: one\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(false, [{ severity: 'major', detail: 'still broken' }])],
+    },
+  })
+  const stoppedOutcome = await stopped.tools.get('roles_run').execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(stoppedOutcome.status, 'unapproved')
+  assert.match(stoppedOutcome.text, /- stop/)
+
+  const model = makeHarness({
+    config: { maxRounds: 1 },
+    userAnswers: { exhaustion: 'Change the WORKER model', 'worker-model': 'zai/zai-model' },
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      worker: ['CHANGES: one\nSTATUS: done', 'CHANGES: two\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(false, [{ severity: 'major', detail: 'not done' }]), verdict(true, [], 'ok now')],
+      reviewer: [verdict(true, [], 'approved')],
+    },
+  })
+  const modelOutcome = await model.tools.get('roles_run').execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(modelOutcome.status, 'approved')
+  const laterWorker = model.calls.filter(call => call.role === 'worker').at(-1)
+  assert.deepEqual(laterWorker.agentOptions, { provider: 'zai', model: 'zai-model' })
+  assert.match(modelOutcome.text, /- model → zai\/zai-model/)
+})
+
+test('exhaustion without an answerer ends NOT APPROVED with a note', async () => {
+  const harness = makeHarness({
+    config: { maxRounds: 1 },
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      worker: ['CHANGES: one\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(false, [{ severity: 'major', detail: 'still broken' }])],
+    },
+  })
+  const outcome = await harness.tools.get('roles_run').execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(outcome.status, 'unapproved')
+  assert.match(outcome.text, /no interactive answerer/)
+  assert.match(outcome.text, /- none/)
+})
+
+test('the exhaustion retry respects the hard attempt cap', async () => {
+  const harness = makeHarness({
+    config: { maxRounds: 6 },
+    userAnswers: { exhaustion: 'Try 3 more rounds' },
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      advisor: [verdict(true, [], 'plan ok')],
+    },
+  })
+  const outcome = await harness.tools.get('roles_run').execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(outcome.status, 'unapproved')
+  assert.equal(harness.calls.filter(call => call.role === 'worker').length, 12)
+  assert.match(outcome.text, /hard cap of 12 worker attempts/)
+  assert.deepEqual(outcome.decisions.map(decision => decision.choice), ['retry', 'retry', 'retry'])
+})
+
+test('/role-plan runs the team on a task and reads a plan file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'role-plan-'))
+  const file = join(dir, 'plan.md')
+  await writeFile(file, '# Plan\n\n1. Edit a.js\n2. Test a.js\n', 'utf8')
+
+  const taskHarness = makeHarness({
+    responses: {
+      plan: ['STEPS:\n1. Implement Y'],
+      worker: ['CHANGES: done\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(true, [], 'work ok')],
+      reviewer: [verdict(true, [], 'approved')],
+    },
+  })
+  const command = taskHarness.commands.get('role-plan')
+  assert.ok(command)
+
+  const usage = await command.handler({ agent: AGENT, rawInput: '', signal: SIGNAL })
+  assert.equal(usage.kind, 'error')
+  assert.match(usage.text, /usage: \/role-plan/)
+
+  const taskRun = await command.handler({ agent: AGENT, rawInput: 'Implement Y', signal: SIGNAL })
+  assert.equal(taskRun.kind, 'success')
+  assert.equal(taskHarness.calls.filter(call => call.role === 'plan').length, 1)
+  assert.match(taskRun.text, /APPROVED/)
+
+  const fileHarness = makeHarness({
+    cwd: dir,
+    responses: {
+      worker: ['CHANGES: done\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(true, [], 'work ok')],
+      reviewer: [verdict(true, [], 'approved')],
+    },
+  })
+  const fileCommand = fileHarness.commands.get('role-plan')
+  const fileRun = await fileCommand.handler({ agent: AGENT, rawInput: 'plan.md', signal: SIGNAL })
+  assert.equal(fileRun.kind, 'success')
+  assert.equal(fileHarness.calls.filter(call => call.role === 'plan').length, 0)
+  const worker = fileHarness.calls.find(call => call.role === 'worker')
+  assert.ok(worker.prompt.includes('1. Edit a.js'))
+  assert.ok(worker.prompt.includes('Execute the plan in plan.md exactly.'))
+
+  const missing = await fileCommand.handler({ agent: AGENT, rawInput: 'no-such.md', signal: SIGNAL })
+  assert.equal(missing.kind, 'error')
+  assert.match(missing.text, /could not read the plan file/)
+})
+
+test('/role-plan is exported and handles a missing command service', async () => {
+  const harness = makeHarness()
+  const result = await handleRolePlanCommand(harness.ctx, resolveRoleTeamConfig({}), { agent: AGENT, rawInput: 'plain task', signal: SIGNAL })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /Role team: NOT APPROVED/)
+})
+
+test('the tools carry structured presentation metadata', async () => {
+  const harness = makeHarness({
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      worker: ['CHANGES: done\nSTATUS: done'],
+      advisor: [verdict(true, [], 'plan ok'), verdict(true, [], 'work ok')],
+      reviewer: [verdict(true, [], 'approved')],
+    },
+  })
+  const runTool = harness.tools.get('roles_run')
+  const value = await runTool.execute({ task: 'Do it' }, { agent: AGENT, signal: SIGNAL })
+  const meta = runTool.output.presentationMeta({}, value)
+  assert.equal(meta.tool, 'roles_run')
+  assert.equal(meta.status, 'approved')
+  assert.equal(meta.stages.length, 5)
+  assert.ok(meta.stages.every(stage => stage.route === null || (typeof stage.route === 'object' && typeof stage.route.model === 'string')))
+  assert.ok(meta.comments.some(comment => comment.stage === 'plan audit 1' && comment.approved === true))
+  assert.ok(meta.comments.some(comment => comment.role === 'reviewer' && comment.approved === true))
+  assert.equal(value.rounds[0].worker.route.model, 'deepseek-v4.1-flash')
+  assert.equal(value.planAudits[0].route.model, 'glm-5.3')
+
+  const advisorTool = harness.tools.get('role_advisor')
+  const advisorValue = await advisorTool.execute({ task: 'check it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(advisorValue.role, 'advisor')
+  assert.equal(advisorValue.route.model, 'glm-5.3')
+  const advisorMeta = advisorTool.output.presentationMeta({}, advisorValue)
+  assert.equal(advisorMeta.tool, 'role_advisor')
+  assert.equal(advisorMeta.role, 'advisor')
+  assert.equal(advisorMeta.route.model, 'glm-5.3')
+  assert.equal(typeof advisorMeta.verdict.approved, 'boolean')
+
+  const planTool = harness.tools.get('role_plan')
+  const planValue = await planTool.execute({ task: 'plan it' }, { agent: AGENT, signal: SIGNAL })
+  assert.equal(planValue.role, 'plan')
+  assert.ok(planValue.verdict === undefined)
+  assert.match(planValue.text, /Role PLAN/)
+})
+
+test('the live run state tracks stages and is served by the run route', async () => {
+  let midRun
+  let routeSnapshot
+  const harness = makeHarness({
+    responses: {
+      plan: ['STEPS:\n1. Do it'],
+      worker: ['CHANGES: one\nSTATUS: done', (prompt, index) => {
+        if (index === 2) {
+          midRun = runStateOf('call-1')
+          routeSnapshot = handleRunStateRequest(harness.ctx, new Request('http://127.0.0.1:62592/plugin-api/role-team/run/call-1', { headers: { host: '127.0.0.1:62592' } }))
+        }
+        return 'CHANGES: two\nSTATUS: done'
+      }],
+      advisor: [verdict(true, [], 'plan ok'), verdict(true, [], 'ok'), verdict(true, [], 'ok again')],
+      reviewer: [verdict(false, [{ severity: 'major', detail: 'one more' }]), verdict(true, [], 'approved')],
+    },
+  })
+  const outcome = await harness.tools.get('roles_run').execute(
+    { task: 'Do it' },
+    { agent: AGENT, signal: SIGNAL, callId: 'call-1' },
+  )
+  assert.equal(outcome.status, 'approved')
+  assert.equal(runStateOf('call-1'), undefined)
+
+  assert.ok(midRun !== undefined)
+  assert.equal(midRun.tool, 'roles_run')
+  assert.equal(midRun.currentRole, 'worker')
+  assert.deepEqual(midRun.stages.map(stage => stage.role), ['plan', 'advisor', 'worker', 'advisor', 'reviewer', 'worker'])
+  assert.equal(midRun.stages.at(-1).status, 'running')
+  assert.equal(midRun.stages[0].status, 'done')
+  assert.equal(midRun.stages[0].route.model, 'gpt-6-luna')
+
+  assert.ok(routeSnapshot !== undefined)
+  assert.equal(routeSnapshot.status, 200)
+  const body = await routeSnapshot.json()
+  assert.equal(body.ok, true)
+  assert.equal(body.run.stages.at(-1).role, 'worker')
+
+  const unknown = handleRunStateRequest(harness.ctx, new Request('http://127.0.0.1:62592/plugin-api/role-team/run/missing', { headers: { host: '127.0.0.1:62592' } }))
+  assert.equal(unknown.status, 404)
+  const crossSite = handleRunStateRequest(harness.ctx, new Request('http://127.0.0.1:62592/plugin-api/role-team/run/call-1', {
+    headers: { host: '127.0.0.1:62592', 'sec-fetch-site': 'cross-site' },
+  }))
+  assert.equal(crossSite.status, 403)
+  const bare = handleRunStateRequest(harness.ctx, new Request('http://127.0.0.1:62592/plugin-api/role-team/run', { headers: { host: '127.0.0.1:62592' } }))
+  assert.equal(bare.status, 404)
 })

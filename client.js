@@ -78,6 +78,20 @@ window.__ModuleLoader__.load({
       warningInherit: 'At least one of WORKER, ADVISOR or REVIEWER inherits the session model, so cross-family independence is not guaranteed.',
       chooseEffort: 'Effort',
       modelUnavailable: 'This route is not advertised by any routable provider right now. Pick another model or reset the role.',
+      runTitle: 'Role team',
+      preparing: 'Preparing…',
+      running: 'Running…',
+      pipeline: 'Pipeline',
+      comments: 'ADVISOR and REVIEWER comments',
+      approved: 'Approved',
+      changes: 'Changes required',
+      continued: 'Continued without approval',
+      notApproved: 'Not approved',
+      failed: 'Failed',
+      decisions: 'Decisions',
+      inheritRoute: 'session model',
+      noMeta: 'Structured details are unavailable; showing the raw report.',
+      rawReport: 'Raw report',
     }
 
     const ru = {
@@ -114,6 +128,20 @@ window.__ModuleLoader__.load({
       warningInherit: 'Хотя бы одна из ролей WORKER, ADVISOR или REVIEWER наследует модель сессии, поэтому независимость семейств не гарантирована.',
       chooseEffort: 'Усилие',
       modelUnavailable: 'Этот маршрут сейчас не предлагается ни одним доступным провайдером. Выберите другую модель или сбросьте роль.',
+      runTitle: 'Команда ролей',
+      preparing: 'Подготовка…',
+      running: 'Выполняется…',
+      pipeline: 'Конвейер',
+      comments: 'Замечания ADVISOR и REVIEWER',
+      approved: 'Одобрено',
+      changes: 'Нужны правки',
+      continued: 'Продолжено без одобрения',
+      notApproved: 'Не одобрено',
+      failed: 'Ошибка',
+      decisions: 'Решения',
+      inheritRoute: 'модель сессии',
+      noMeta: 'Структурированные данные недоступны; показан исходный отчёт.',
+      rawReport: 'Исходный отчёт',
     }
 
     const zh = {
@@ -150,6 +178,20 @@ window.__ModuleLoader__.load({
       warningInherit: 'WORKER、ADVISOR 或 REVIEWER 中至少有一个继承会话模型，因此无法保证跨系列独立性。',
       chooseEffort: '强度',
       modelUnavailable: '当前没有可路由的提供商提供此路由。请选择其他模型或重置该角色。',
+      runTitle: '角色团队',
+      preparing: '准备中…',
+      running: '运行中…',
+      pipeline: '流水线',
+      comments: 'ADVISOR 和 REVIEWER 的意见',
+      approved: '已通过',
+      changes: '需要修改',
+      continued: '未经批准继续',
+      notApproved: '未通过',
+      failed: '失败',
+      decisions: '决定',
+      inheritRoute: '会话模型',
+      noMeta: '结构化数据不可用；显示原始报告。',
+      rawReport: '原始报告',
     }
 
     const CSS = `
@@ -293,6 +335,62 @@ window.__ModuleLoader__.load({
   .dsh-rt-dialog-body { grid-template-columns: 1fr; }
   .dsh-rt-providers { flex-direction: row; border-right: 0; border-bottom: 0.5px solid var(--dsw-alias-border-l3); }
   .dsh-rt-provider { width: auto; white-space: nowrap; }
+}
+.dsh-rt-tool {
+  box-sizing: border-box; display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 9px 12px; border: 0.5px solid var(--dsw-alias-settings-card-stroke);
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-settings-card-fill);
+  color: var(--dsw-alias-label-primary); font: inherit; text-align: left; cursor: pointer;
+}
+@media (hover: hover) { .dsh-rt-tool:hover { background: var(--dsw-alias-interactive-bg-hover); } }
+.dsh-rt-tool:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary); }
+.dsh-rt-tool-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dsh-rt-tool-dots { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+.dsh-rt-tool-title { font-size: 12px; line-height: 18px; font-weight: 600; letter-spacing: .04em; white-space: nowrap; }
+.dsh-rt-pill {
+  font-size: 11px; line-height: 16px; padding: 1px 7px; border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); white-space: nowrap;
+}
+.dsh-rt-pill-ok { color: var(--dsw-alias-state-success-primary); }
+.dsh-rt-pill-warn { color: var(--dsw-alias-state-warn-label); }
+.dsh-rt-pill-err { color: var(--dsw-alias-state-error-primary); }
+.dsh-rt-tool-task {
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dsh-rt-tool-body { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.dsh-rt-section-label {
+  font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--dsw-alias-label-tertiary);
+}
+.dsh-rt-stages { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsh-rt-stage {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+  border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 999px;
+  font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-secondary);
+}
+.dsh-rt-stage[data-active='true'] { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-label-primary); }
+.dsh-rt-stage-route {
+  font-size: 10px; line-height: 14px; color: var(--dsw-alias-label-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.dsh-rt-comment {
+  border: 0.5px solid var(--dsw-alias-border-l3); border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1); padding: 9px 11px;
+}
+.dsh-rt-comment-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsh-rt-comment-role { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 18px; font-weight: 600; letter-spacing: .04em; }
+.dsh-rt-comment-stage { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
+.dsh-rt-comment-summary { margin: 4px 0 2px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary); white-space: pre-wrap; word-break: break-word; }
+.dsh-rt-issues { margin: 2px 0 0; padding: 0 0 0 16px; display: flex; flex-direction: column; gap: 2px; }
+.dsh-rt-issue { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); word-break: break-word; }
+.dsh-rt-decisions { margin: 0; padding: 0 0 0 16px; display: flex; flex-direction: column; gap: 2px; }
+.dsh-rt-decision { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.dsh-rt-raw {
+  margin: 0; padding: 9px 11px; border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow: auto;
 }
 `
 
@@ -743,6 +841,198 @@ window.__ModuleLoader__.load({
         }))
     }
 
+    /** The role tools this browser half renders as dedicated cards. */
+    const TOOL_KEYS = ['roles_run', 'role_plan', 'role_worker', 'role_advisor', 'role_reviewer']
+
+    /**
+     * Read the `task` argument out of a tool call's raw arguments.
+     * @param {object} block preparing, started, or settled Tool block
+     * @returns {string} the task text, or '' when unavailable
+     */
+    function taskOf(block) {
+      try {
+        const call = block !== null && typeof block === 'object' && 'kind' in block ? block.call : block
+        if (call === null || call === undefined || typeof call.argsRaw !== 'string') return ''
+        const parsed = JSON.parse(call.argsRaw)
+        return typeof parsed?.task === 'string' ? parsed.task : ''
+      } catch {
+        return ''
+      }
+    }
+
+    /**
+     * First text block of a settled result, for the plain-text fallback.
+     * @param {object} block settled Tool result
+     * @returns {string} its text, or ''
+     */
+    function rawTextOf(block) {
+      const content = Array.isArray(block?.content) ? block.content : []
+      const first = content.find(part => part && part.type === 'text' && typeof part.text === 'string')
+      const text = first === undefined ? '' : first.text
+      return text.length > 2400 ? `${text.slice(0, 2400)}\n…` : text
+    }
+
+    /**
+     * One role label with its route, shared by stage badges and comment heads.
+     * @param {string} role role name
+     * @param {object | null} route role route
+     * @param {(key: string) => string} t translator
+     * @returns {object} React node
+     */
+    function roleLabel(role, route, t) {
+      return h('span', { className: 'dsh-rt-comment-role' },
+        h('span', { className: 'dsh-rt-dot', style: { background: ROLE_COLOR[role] ?? 'var(--dsw-alias-label-tertiary)' } }),
+        ROLE_LABEL[role] ?? role,
+        h('span', { className: 'dsh-rt-stage-route' },
+          route === null || route === undefined ? t('inheritRoute') : `${route.provider}/${route.model}${route.reasoningEffort === undefined ? '' : ` @${route.reasoningEffort}`}`))
+    }
+
+    /**
+     * Poll the live run state of one call while it is in flight.
+     * @param {string | undefined} callId tool call id
+     * @param {boolean} active whether the call is running
+     * @returns {object | null} the live run state
+     */
+    function useRunState(callId, active) {
+      const [run, setRun] = React.useState(null)
+      React.useEffect(() => {
+        if (!active || !callId) return undefined
+        let alive = true
+        const load = async () => {
+          try {
+            const response = await fetch(`/plugin-api/role-team/run/${encodeURIComponent(callId)}`, {
+              credentials: 'same-origin',
+              headers: { accept: 'application/json' },
+            })
+            if (!response.ok) return
+            const data = await response.json()
+            if (alive && data && data.ok) setRun(data.run)
+          } catch {
+            // A transient poll failure just waits for the next tick.
+          }
+        }
+        void load()
+        const timer = setInterval(load, 2500)
+        return () => { alive = false; clearInterval(timer) }
+      }, [callId, active])
+      return run
+    }
+
+    /**
+     * The dedicated chat-timeline card for one role tool call.
+     * @param {object} props owner props of the keyed toolview
+     * @returns {object} React node
+     */
+    function RoleToolRow(props) {
+      const { toolName, block, useDisclosure } = props
+      const t = typeof props.t === 'function' ? props.t : (key => key)
+      const callId = props.callId
+      const [fallbackExpanded, setFallbackExpanded] = React.useState(false)
+      const disclosure = typeof useDisclosure === 'function'
+        ? useDisclosure()
+        : { expanded: fallbackExpanded, toggle: () => setFallbackExpanded(value => !value) }
+      const settled = block !== null && typeof block === 'object' && 'kind' in block
+      const preparing = !settled && block?.phase !== 'start'
+      const isError = settled && block.isError === true
+      const meta = settled && !isError && block.meta !== null && typeof block.meta === 'object'
+        && !Array.isArray(block.meta) && block.meta.v === 1 ? block.meta : null
+      const live = useRunState(callId, !settled && !preparing)
+      const task = taskOf(block)
+      const stages = meta !== null && Array.isArray(meta.stages) ? meta.stages
+        : live !== null && Array.isArray(live.stages) ? live.stages : []
+      const comments = meta !== null && Array.isArray(meta.comments) ? meta.comments : []
+      const decisions = meta !== null && Array.isArray(meta.decisions) ? meta.decisions : []
+      const verdict = meta !== null && meta.verdict !== null && typeof meta.verdict === 'object' ? meta.verdict : null
+      const statusKey = preparing
+        ? 'preparing'
+        : settled
+          ? isError
+            ? 'failed'
+            : verdict !== null
+              ? verdict.approved ? 'approved' : 'changes'
+              : meta?.status === 'approved' ? 'approved'
+                : meta?.status === 'continued' ? 'continued'
+                  : meta?.status === 'unapproved' ? 'notApproved' : 'changes'
+          : 'running'
+      const pillClass = statusKey === 'approved' || statusKey === 'continued'
+        ? 'dsh-rt-pill dsh-rt-pill-ok'
+        : statusKey === 'failed' ? 'dsh-rt-pill dsh-rt-pill-err' : 'dsh-rt-pill dsh-rt-pill-warn'
+      const role = toolName === 'roles_run' ? 'plan' : toolName.replace(/^role_/, '')
+      const headerRoles = toolName === 'roles_run' ? ROLES : [role]
+
+      const body = disclosure.expanded
+        ? h('div', { className: 'dsh-rt-tool-body' },
+            stages.length > 0
+              ? h('div', null,
+                  h('div', { className: 'dsh-rt-section-label' }, t('pipeline')),
+                  h('div', { className: 'dsh-rt-stages' },
+                    stages.map((stage, index) => h('span', {
+                      key: index,
+                      className: 'dsh-rt-stage',
+                      'data-active': stage.status === 'running' ? 'true' : 'false',
+                    },
+                    h('span', { className: 'dsh-rt-dot', style: { background: ROLE_COLOR[stage.role] ?? 'var(--dsw-alias-label-tertiary)' } }),
+                    ROLE_LABEL[stage.role] ?? stage.role,
+                    h('span', { className: 'dsh-rt-stage-route' },
+                      stage.route === null || stage.route === undefined ? t('inheritRoute') : `${stage.route.provider}/${stage.route.model}`)))))
+              : null,
+            comments.length > 0
+              ? h('div', null,
+                  h('div', { className: 'dsh-rt-section-label' }, t('comments')),
+                  comments.map((comment, index) => h('div', { key: index, className: 'dsh-rt-comment' },
+                    h('div', { className: 'dsh-rt-comment-head' },
+                      roleLabel(comment.role, comment.route, t),
+                      h('span', { className: 'dsh-rt-comment-stage' }, comment.stage ?? ''),
+                      h('span', {
+                        className: comment.approved ? 'dsh-rt-pill dsh-rt-pill-ok' : 'dsh-rt-pill dsh-rt-pill-warn',
+                      }, comment.approved ? t('approved') : t('changes'))),
+                    typeof comment.summary === 'string' && comment.summary !== ''
+                      ? h('p', { className: 'dsh-rt-comment-summary' }, comment.summary)
+                      : null,
+                    Array.isArray(comment.issues) && comment.issues.length > 0
+                      ? h('ul', { className: 'dsh-rt-issues' },
+                          comment.issues.map((issue, issueIndex) => h('li', {
+                            key: issueIndex,
+                            className: 'dsh-rt-issue',
+                          }, `[${issue.severity ?? 'major'}] ${issue.detail ?? ''}`)))
+                      : null)))
+              : null,
+            decisions.length > 0
+              ? h('div', null,
+                  h('div', { className: 'dsh-rt-section-label' }, t('decisions')),
+                  h('ul', { className: 'dsh-rt-decisions' },
+                    decisions.map((decision, index) => h('li', { key: index, className: 'dsh-rt-decision' },
+                      `${decision.choice ?? ''}${decision.route === undefined ? '' : ` → ${decision.route.provider}/${decision.route.model}`}`))))
+              : null,
+            settled
+              ? h('div', null,
+                  meta === null ? h('p', { className: 'dsh-rt-note', style: { margin: '0 0 6px' } }, t('noMeta')) : null,
+                  h('details', null,
+                    h('summary', { style: { fontSize: '12px', color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer' } }, t('rawReport')),
+                    h('pre', { className: 'dsh-rt-raw' }, rawTextOf(block) || '(no report)')))
+              : null)
+        : null
+
+      return h('div', { className: 'dsh-rt-tool', 'data-plugin': 'role-team', 'data-phase': preparing ? 'preparing' : settled ? 'result' : 'start' },
+        h('button', {
+          type: 'button',
+          className: 'dsh-rt-tool-head',
+          'aria-expanded': disclosure.expanded ? 'true' : 'false',
+          onClick: disclosure.toggle,
+          style: { border: 'none', background: 'transparent', padding: 0, font: 'inherit', cursor: 'pointer' },
+        },
+        h('span', { className: 'dsh-rt-tool-dots' },
+          headerRoles.map(headerRole => h('span', {
+            key: headerRole,
+            className: 'dsh-rt-dot',
+            style: { background: ROLE_COLOR[headerRole] ?? 'var(--dsw-alias-label-tertiary)' },
+          }))),
+        h('span', { className: 'dsh-rt-tool-title' }, toolName === 'roles_run' ? t('runTitle') : ROLE_LABEL[role] ?? toolName),
+        h('span', { className: pillClass }, t(statusKey)),
+        task === '' ? null : h('span', { className: 'dsh-rt-tool-task' }, task)),
+        body)
+    }
+
     return {
       inject: ['slots', 'locale', 'remote', 'remote.session'],
       apply(ctx) {
@@ -764,6 +1054,11 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ api, t }),
         }, RoleTeamSection))
+        ctx.slots.inject('tool.call.toolview', function* () {
+          for (const key of TOOL_KEYS) {
+            yield ctx.slots.register({ name: 'tool.call.toolview', key, locale: NS }, RoleToolRow)
+          }
+        })
       },
     }
   },

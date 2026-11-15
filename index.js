@@ -18,6 +18,9 @@
  * @module @local/dsh-role-team
  */
 
+import { readFile } from 'node:fs/promises'
+import { isAbsolute, resolve as resolvePath } from 'node:path'
+
 /** The four roles, in pipeline order. */
 export const ROLE_NAMES = Object.freeze(['plan', 'worker', 'advisor', 'reviewer'])
 
@@ -59,13 +62,19 @@ const LIMITS = Object.freeze({
   toolTaskChars: 60_000,
   maxRounds: 6,
   maxChildDepth: 8,
+  /** Upper bound of the `maxPlanPasses` configuration (audit → revise cycles before WORKER). */
+  maxPlanPasses: 3,
+  /** Hard cap on total WORKER attempts per run, including rounds granted by the user's exhaustion choice. */
+  maxWorkerAttempts: 12,
+  /** A plan file larger than this is refused instead of read. */
+  planFileMaxChars: 200_000,
 })
 
 /** Same-origin settings route served to the browser half. */
 const ROLES_SETTINGS_ROUTE = '/plugin-api/role-team/roles'
 
 /** The section that tells the lead what the team is for. */
-const ROLE_GUIDANCE = `Role team (PLAN -> WORKER -> ADVISOR -> REVIEWER) is available. \`roles_run\` runs the full loop on a self-contained task: PLAN drafts, WORKER implements in this shared workspace, ADVISOR audits every worker attempt, and REVIEWER performs the final independent gate only after WORKER reports completion and ADVISOR approves. Use it for substantial implementation, migration or verification work. Pass the user's task verbatim and every fact the roles need: they start without this conversation. The \`role_*\` tools run a single role once when that is enough. Calls block until the role reports; the returned reports are the only thing you see. Role models are configured separately and may use different providers; inspect or change them with \`/roles\`. Do not start the REVIEWER before the worker has reported completion.`
+const ROLE_GUIDANCE = `Role team (PLAN -> WORKER -> ADVISOR -> REVIEWER) is available. \`roles_run\` runs the full loop on a self-contained task: PLAN drafts a rigorous plan, the ADVISOR audits that plan before WORKER starts (a rejected plan is revised from the advisor's issues), WORKER implements in this shared workspace, ADVISOR audits every attempt, and REVIEWER is the final gate whose approval is the only approved outcome; when the rounds run out without approval the run asks the user how to proceed. Use it for substantial implementation, migration or verification work. Pass the user's task verbatim and every fact the roles need: they start without this conversation. The \`role_*\` tools run a single role once when that is enough. The user can also start the whole pipeline with the \`/role-plan\` chat command, which takes a task or a plan file (for example a Jev plan artifact) that the team then executes. Role models are configured separately and may use different providers; inspect or change them with \`/roles\`. Do not start the REVIEWER before the worker has reported completion.`
 
 /* ------------------------------------------------------------------------- *
  * Small utilities
@@ -308,6 +317,7 @@ export function resolveRoleTeamConfig(raw) {
     sources,
     problems,
     maxRounds: clampInt(input.maxRounds, 1, LIMITS.maxRounds, 3),
+    maxPlanPasses: clampInt(input.maxPlanPasses, 1, LIMITS.maxPlanPasses, 2),
     childMaxDepth: clampInt(input.childMaxDepth, 0, LIMITS.maxChildDepth, 2),
     prompts,
   }
@@ -353,6 +363,16 @@ function workspaceLine(cwd) {
   return cwd === undefined || cwd === '' ? '' : `Workspace: ${cwd}\n`
 }
 
+/** The four labeled parts every PLAN output must carry. */
+const PLAN_PARTS = `STEPS:
+1. … numbered steps; each step names the exact file or module path it changes and the concrete change it makes.
+RISKS:
+- … named risks and edge cases; for each, state what must be verified rather than assumed.
+VERIFY:
+- … the exact commands that prove completion (tests, builds, linters, checks).
+ACCEPT:
+- … acceptance checks, each phrased so an independent reviewer can verify it without the plan's author.`
+
 /**
  * Build the PLAN prompt.
  * @param {object} params prompt inputs
@@ -369,11 +389,65 @@ ${workspaceLine(cwd)}
 Task (verbatim):
 ${clip(task, LIMITS.toolTaskChars)}
 ${context === undefined || context.trim() === '' ? '' : `\nContext:\n${clip(context, 20_000)}\n`}
-Produce an implementation plan with:
-1. Ordered steps, each naming the exact files or modules to change and the concrete change.
-2. Risks, edge cases, and anything that must be verified rather than assumed.
-3. Commands that prove completion (tests, builds, linters, checks).
-4. Acceptance checks a reviewer can verify independently.
+Produce an implementation plan with exactly these four labeled parts:
+${PLAN_PARTS}
+Keep it under 100 lines. Return only the plan.${extra === undefined ? '' : `\n\n${extra}`}`
+}
+
+/**
+ * Build the ADVISOR prompt that audits a plan before implementation starts.
+ * @param {object} params prompt inputs
+ * @param {string} params.task task text
+ * @param {string} [params.context] extra context
+ * @param {string} params.plan plan text
+ * @param {string | undefined} params.cwd working directory
+ * @param {string} [params.extra] role-specific extra instructions
+ * @returns {string} prompt
+ */
+export function buildPlanAuditPrompt({ task, context, plan, cwd, extra }) {
+  return `You are ADVISOR, an independent senior reviewer from a different model family than WORKER. Do not edit files. You are auditing the PLAN before any implementation starts: judge the plan itself, not the workspace.
+${COMMON_ROLE_RULES}
+${workspaceLine(cwd)}
+Task (verbatim):
+${clip(task, LIMITS.toolTaskChars)}
+${context === undefined || context.trim() === '' ? '' : `\nContext:\n${clip(context, 12_000)}\n`}
+Plan to audit:
+${clip(plan, LIMITS.planChars)}
+
+Judge whether this plan is good enough to implement as it is: does it cover the whole task, name the exact files or modules to change, order the steps correctly, name the real risks and edge cases, and include commands and acceptance checks an independent reviewer can verify? Be adversarial about gaps and wrong assumptions, but do not invent scope the task did not ask for. Set approved=true only when no blocker or major issue remains.
+Return STRICT JSON only, with no markdown fence:
+{"approved": true|false, "summary": "one paragraph", "issues": [{"severity": "blocker|major|minor", "detail": "specific, actionable, with file or line when possible"}]}${extra === undefined ? '' : `\n\n${extra}`}`
+}
+
+/**
+ * Build the PLAN prompt that revises a rejected plan from the advisor's issues.
+ * @param {object} params prompt inputs
+ * @param {string} params.task task text
+ * @param {string} [params.context] extra context
+ * @param {string} params.plan rejected plan text
+ * @param {string[]} params.issues advisor issues to address
+ * @param {string | undefined} params.cwd working directory
+ * @param {string} [params.extra] role-specific extra instructions
+ * @returns {string} prompt
+ */
+export function buildPlanRevisionPrompt({ task, context, plan, issues, cwd, extra }) {
+  const issueText = issues.length === 0
+    ? '(the advisor rejected the plan without concrete issues; find and fix the weaknesses yourself)'
+    : issues.map((issue, index) => `${index + 1}. ${issue}`).join('\n')
+  return `You are PLAN, the planner of a four-role engineering team. The ADVISOR rejected your plan. Rewrite it so every advisor issue is addressed. You do not edit files.
+${COMMON_ROLE_RULES}
+${workspaceLine(cwd)}
+Task (verbatim):
+${clip(task, LIMITS.toolTaskChars)}
+${context === undefined || context.trim() === '' ? '' : `\nContext:\n${clip(context, 12_000)}\n`}
+Advisor issues to address:
+${issueText}
+
+Plan to revise:
+${clip(plan, LIMITS.planChars)}
+
+Produce the revised plan with exactly these four labeled parts:
+${PLAN_PARTS}
 Keep it under 100 lines. Return only the plan.${extra === undefined ? '' : `\n\n${extra}`}`
 }
 
@@ -732,21 +806,50 @@ function formatRoleResult(result) {
   return clip(`${header}\n\n${body}${diagnostic}`, LIMITS.roleOutputChars)
 }
 
+/**
+ * Build the structured canonical value of one single-role tool.
+ * @param {object} result role result
+ * @param {object} [verdict] parsed ADVISOR/REVIEWER verdict
+ * @returns {object} canonical value
+ */
+function structuredRoleResult(result, verdict) {
+  return {
+    text: formatRoleResult(result),
+    role: result.role,
+    route: result.route,
+    status: result.status,
+    durationMs: result.durationMs,
+    ...(verdict === undefined ? {} : { verdict }),
+  }
+}
+
 /* ------------------------------------------------------------------------- *
  * The orchestrated team loop
  * ------------------------------------------------------------------------- */
 
 /**
- * Build the final report handed back to the lead.
+ * Build the final report handed back to the lead: verdicts first, then the
+ * plan, then the round-by-round detail and the user's exhaustion decisions.
  * @param {object} params report inputs
  * @returns {string} report text
  */
-function buildTeamReport({ status, config, plan, rounds, startedAt, task }) {
+function buildTeamReport({ status, config, plan, rounds, comments, decisions, startedAt, task, note }) {
   const lines = []
-  lines.push(`Role team: ${status === 'approved' ? 'APPROVED' : 'NOT APPROVED'} after ${rounds.length} round(s) in ${formatDuration(Date.now() - startedAt)}.`)
+  const headline = status === 'approved' ? 'APPROVED' : status === 'continued' ? 'CONTINUED WITHOUT APPROVAL' : 'NOT APPROVED'
+  lines.push(`Role team: ${headline} after ${rounds.length} round(s) in ${formatDuration(Date.now() - startedAt)}.`)
   lines.push(`Roles: ${ROLE_NAMES.map(role => `${role}=${formatRoute(config.roles[role])}`).join(' · ')}`)
   lines.push(`Task: ${oneLine(task, 300)}`)
-  lines.push('')
+  if (comments.length > 0) {
+    lines.push('')
+    lines.push('ADVISOR AND REVIEWER COMMENTS')
+    for (const comment of comments) {
+      const label = comment.role === 'reviewer' ? 'REVIEWER' : 'ADVISOR'
+      lines.push(`${label} (${formatRoute(comment.route)}) — ${comment.stage} — ${comment.approved ? 'APPROVED' : 'CHANGES REQUIRED'}`)
+      if (comment.summary !== '') lines.push(clip(comment.summary, LIMITS.verdictChars))
+      for (const issue of comment.issues) lines.push(`- [${issue.severity}] ${issue.detail}`)
+      lines.push('')
+    }
+  }
   lines.push('PLAN')
   lines.push(clip(plan, LIMITS.planChars))
   for (const round of rounds) {
@@ -755,17 +858,20 @@ function buildTeamReport({ status, config, plan, rounds, startedAt, task }) {
     lines.push(`WORKER (${formatRoute(round.worker.route)}, ${round.worker.status}, ${formatDuration(round.worker.durationMs)})`)
     lines.push(clip(round.worker.text === '' ? '(no report)' : round.worker.text, LIMITS.workerChars))
     if (round.worker.diagnostic !== undefined) lines.push(`Diagnostic: ${clip(round.worker.diagnostic, 1500)}`)
-    lines.push('')
     lines.push(`ADVISOR (${formatRoute(round.advisor.route)}, ${round.advisor.status}, ${formatDuration(round.advisor.durationMs)}) — ${round.advisorVerdict.approved ? 'APPROVED' : 'CHANGES REQUIRED'}`)
-    lines.push(clip(round.advisorVerdict.summary === '' ? round.advisor.text : round.advisorVerdict.summary, LIMITS.verdictChars))
     if (round.advisor.diagnostic !== undefined) lines.push(`Diagnostic: ${clip(round.advisor.diagnostic, 1500)}`)
-    for (const issue of round.advisorVerdict.issues) lines.push(`- [${issue.severity}] ${issue.detail}`)
     if (round.reviewer !== undefined) {
-      lines.push('')
       lines.push(`REVIEWER (${formatRoute(round.reviewer.route)}, ${round.reviewer.status}, ${formatDuration(round.reviewer.durationMs)}) — ${round.reviewerVerdict.approved ? 'APPROVED' : 'CHANGES REQUIRED'}`)
-      lines.push(clip(round.reviewerVerdict.summary === '' ? round.reviewer.text : round.reviewerVerdict.summary, LIMITS.verdictChars))
       if (round.reviewer.diagnostic !== undefined) lines.push(`Diagnostic: ${clip(round.reviewer.diagnostic, 1500)}`)
-      for (const issue of round.reviewerVerdict.issues) lines.push(`- [${issue.severity}] ${issue.detail}`)
+    }
+  }
+  if (decisions.length > 0) {
+    lines.push('')
+    lines.push('DECISIONS')
+    for (const decision of decisions) {
+      const route = decision.route === undefined ? '' : ` → ${formatRoute(decision.route)}`
+      const extra = decision.note === undefined ? '' : ` (${decision.note})`
+      lines.push(`- ${decision.choice}${route}${extra}`)
     }
   }
   const last = rounds.at(-1)
@@ -775,19 +881,221 @@ function buildTeamReport({ status, config, plan, rounds, startedAt, task }) {
     const issues = last.reviewerVerdict?.approved === false ? last.reviewerVerdict.issues : last.advisorVerdict.issues
     if (issues.length === 0) lines.push('No structured issues were returned; inspect the round reports above.')
     else for (const issue of issues) lines.push(`- [${issue.severity}] ${issue.detail}`)
+  }
+  if (status !== 'approved' && note !== undefined) {
     lines.push('')
-    lines.push('The task is not approved. Address the outstanding feedback and run the team again, or raise `max_rounds` for another worker attempt.')
+    lines.push(note)
+  }
+  if (status === 'continued') {
+    lines.push('')
+    lines.push('The user chose to continue without approval; the outstanding feedback above remains unaddressed.')
+  }
+  if (status === 'unapproved') {
+    lines.push('')
+    lines.push('The task is not approved. Address the outstanding feedback and run the team again, or grant more rounds through the exhaustion question.')
   }
   return clip(lines.join('\n'), LIMITS.reportChars)
 }
 
+/* ------------------------------------------------------------------------- *
+ * Live run state and the exhaustion question
+ * ------------------------------------------------------------------------- */
+
+/** Live run states keyed by the tool call id, served to the browser half. */
+const runStates = new Map()
+
 /**
- * Run the full PLAN -> WORKER -> ADVISOR -> REVIEWER loop.
+ * Start the live state of one run. Programmatic callers without a call id are
+ * simply not tracked.
+ * @param {string | undefined} callId tool call id
+ * @param {string} tool tool name
+ * @param {string} task task one-liner
+ * @returns {void}
+ */
+function beginRunState(callId, tool, task) {
+  if (callId === undefined) return
+  runStates.set(callId, { tool, task, startedAt: Date.now(), stages: [], currentRole: null })
+}
+
+/**
+ * Mark one stage of a tracked run as running.
+ * @param {string | undefined} callId tool call id
+ * @param {string} role role name
+ * @param {{ provider: string, model: string, reasoningEffort?: string } | null} route role route
+ * @returns {void}
+ */
+function beginRunStage(callId, role, route) {
+  const state = callId === undefined ? undefined : runStates.get(callId)
+  if (state === undefined) return
+  state.stages.push({ role, route: route === null ? null : { ...route }, status: 'running', startedAt: Date.now() })
+  state.currentRole = role
+}
+
+/**
+ * Mark the running stage of one role as done.
+ * @param {string | undefined} callId tool call id
+ * @param {string} role role name
+ * @param {string} roleStatus child stop reason
+ * @param {number} durationMs stage duration
+ * @returns {void}
+ */
+function endRunStage(callId, role, roleStatus, durationMs) {
+  const state = callId === undefined ? undefined : runStates.get(callId)
+  if (state === undefined) return
+  const stage = [...state.stages].reverse().find(entry => entry.role === role && entry.status === 'running')
+  if (stage !== undefined) {
+    stage.status = 'done'
+    stage.roleStatus = roleStatus
+    stage.durationMs = durationMs
+  }
+  if (state.currentRole === role) state.currentRole = null
+}
+
+/** Drop the live state of one run. */
+function endRunState(callId) {
+  if (callId !== undefined) runStates.delete(callId)
+}
+
+/**
+ * The live state of one run, for tests and the run route.
+ * @param {string} callId tool call id
+ * @returns {object | undefined} run state
+ */
+export function runStateOf(callId) {
+  const state = runStates.get(callId)
+  return state === undefined ? undefined : cloneJson(state)
+}
+
+/** The exhaustion choices offered to the user when rounds run out. */
+const EXHAUSTION_OPTIONS = Object.freeze([
+  { label: 'Continue without approval', description: 'End the run now; the work stays as it is with the outstanding feedback listed.' },
+  { label: 'Try 3 more rounds', description: 'Run three more worker attempts with the same models.' },
+  { label: 'Change the WORKER model', description: 'Pick a new worker model first; three more attempts then run on it.' },
+  { label: 'Stop', description: 'End the run as not approved.' },
+])
+
+/**
+ * Ask the user one question through the user-questions service.
+ * @param {object} ctx Host context
+ * @param {object | undefined} agent calling DSH agent
+ * @param {AbortSignal | undefined} signal cancellation
+ * @param {object} question question shape
+ * @returns {Promise<object | undefined>} answer batch, or undefined when asking is impossible
+ */
+async function askUserChoice(ctx, agent, signal, question) {
+  const userQuestions = ctx.get('userQuestions')
+  if (userQuestions === undefined || userQuestions === null || typeof userQuestions.ask !== 'function') return undefined
+  try {
+    return await userQuestions.ask({
+      questions: [question],
+      ...(agent === undefined || agent === null ? {} : { agent }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Read the selected label of one answered question.
+ * @param {object | undefined} answers answer batch
+ * @param {string} id question id
+ * @returns {string | undefined} selected or custom label
+ */
+function selectedLabel(answers, id) {
+  const answer = answers !== undefined && Array.isArray(answers.answers)
+    ? answers.answers.find(candidate => candidate.id === id)
+    : undefined
+  if (answer === undefined) return undefined
+  if (Array.isArray(answer.selected) && answer.selected.length > 0 && typeof answer.selected[0] === 'string') {
+    return answer.selected[0]
+  }
+  if (typeof answer.custom === 'string' && answer.custom.trim() !== '') return answer.custom.trim()
+  return undefined
+}
+
+/**
+ * Ask the user how to proceed when the rounds are exhausted without approval.
+ * @param {object} ctx Host context
+ * @param {object | undefined} agent calling DSH agent
+ * @param {AbortSignal | undefined} signal cancellation
+ * @returns {Promise<{ kind: 'continue' | 'retry' | 'model' | 'stop' | 'none', note?: string }>} decision
+ */
+async function decideOnExhaustion(ctx, agent, signal) {
+  const answers = await askUserChoice(ctx, agent, signal, {
+    id: 'exhaustion',
+    header: 'Role team',
+    question: 'The role team ran out of worker rounds without approval. How should it proceed?',
+    options: EXHAUSTION_OPTIONS,
+  })
+  if (answers === undefined) {
+    return { kind: 'none', note: 'the user could not be asked (no interactive answerer is available), so the run ended NOT APPROVED' }
+  }
+  const label = selectedLabel(answers, 'exhaustion')
+  if (label === 'Continue without approval') return { kind: 'continue' }
+  if (label === 'Try 3 more rounds') return { kind: 'retry' }
+  if (label === 'Change the WORKER model') return { kind: 'model' }
+  if (label === 'Stop') return { kind: 'stop' }
+  return { kind: 'none', note: `the exhaustion answer "${label ?? '(none)'}" was not recognized, so the run ended NOT APPROVED` }
+}
+
+/**
+ * Ask the user which model the WORKER should use next.
+ * @param {object} ctx Host context
+ * @param {object | undefined} agent calling DSH agent
+ * @param {AbortSignal | undefined} signal cancellation
+ * @returns {Promise<{ provider: string, model: string, reasoningEffort?: string } | undefined>} route
+ */
+async function askWorkerModelRoute(ctx, agent, signal) {
+  const llm = ctx.get('llm')
+  if (llm === undefined || llm === null || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+    return undefined
+  }
+  const options = []
+  try {
+    for (const provider of llm.listProviders()) {
+      let models = []
+      try {
+        models = await llm.listModels(provider.id)
+      } catch {
+        continue
+      }
+      for (const model of Array.isArray(models) ? models : []) {
+        if (options.length >= 40) break
+        options.push({ label: `${provider.id}/${model.id}`, description: model.name ?? model.id })
+      }
+      if (options.length >= 40) break
+    }
+  } catch {
+    return undefined
+  }
+  if (options.length === 0) return undefined
+  const answers = await askUserChoice(ctx, agent, signal, {
+    id: 'worker-model',
+    header: 'WORKER model',
+    question: 'Which model should the WORKER use for the next attempts?',
+    options,
+  })
+  const label = selectedLabel(answers, 'worker-model')
+  if (label === undefined) return undefined
+  const parsed = normalizeRoute(label)
+  return parsed.error !== undefined || parsed.route === null ? undefined : parsed.route
+}
+
+/* ------------------------------------------------------------------------- *
+ * The orchestrated team loop
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Run the full PLAN -> plan audit -> WORKER -> ADVISOR -> REVIEWER loop.
  *
- * The loop is deterministic: ADVISOR audits every WORKER attempt, and
- * REVIEWER runs only after ADVISOR approves. A rejected attempt's issues are
- * fed into the next WORKER prompt. Reviewer rejection returns to WORKER and
- * re-enters the same gate.
+ * The loop is deterministic and every role invocation passes through one
+ * `stage` helper, so the fixed order cannot be bypassed: the ADVISOR audits
+ * the plan before WORKER starts (a rejected plan is revised from the
+ * advisor's issues), ADVISOR audits every WORKER attempt, REVIEWER runs only
+ * after ADVISOR approves, and the only approved outcome is the REVIEWER's
+ * verdict. When the rounds are exhausted without approval, the user decides
+ * how to proceed.
  *
  * @param {object} ctx Host context
  * @param {object} options run inputs
@@ -797,9 +1105,10 @@ function buildTeamReport({ status, config, plan, rounds, startedAt, task }) {
  * @param {string} [options.plan] pre-existing plan, skips PLAN
  * @param {AbortSignal} options.signal cancellation
  * @param {object} options.config resolved configuration
- * @returns {Promise<{ status: 'approved' | 'unapproved', report: string, rounds: object[], plan: string }>} outcome
+ * @param {string} [options.callId] tool call id for the live run state
+ * @returns {Promise<{ status: 'approved' | 'unapproved' | 'continued', report: string, rounds: object[], plan: string, planAudits: object[], stages: object[], comments: object[], decisions: object[] }>} outcome
  */
-export async function runRoleTeam(ctx, { agent, task, context, plan, signal, config }) {
+export async function runRoleTeam(ctx, { agent, task, context, plan, signal, config, callId }) {
   if (agent === undefined || agent === null) throw new Error('role team needs a calling agent')
   const taskText = typeof task === 'string' ? task.trim() : ''
   if (taskText === '') throw new Error('role team needs a non-empty task')
@@ -815,87 +1124,183 @@ export async function runRoleTeam(ctx, { agent, task, context, plan, signal, con
     const route = config.roles[role] ?? null
     if (route !== null) await validateRoute(ctx, role, route, signal)
   }
+  // A local copy of the routes: a worker model chosen through the exhaustion
+  // question changes later attempts without mutating the plugin's config.
+  const runConfig = { ...config, roles: { ...config.roles } }
   const startedAt = Date.now()
-  let planText = typeof plan === 'string' ? plan.trim() : ''
-  if (planText === '') {
-    const planResult = await runRole(ctx, config, {
-      role: 'plan',
-      prompt: buildPlanPrompt({ task: taskText, context, cwd, extra: config.prompts.plan }),
-      parent: agent,
-      signal,
-      cwd,
-    })
-    planText = planResult.text.trim()
-    if (planText === '') {
-      throw new Error(`PLAN finished without a plan (${planResult.status}${planResult.diagnostic === undefined ? '' : `: ${clip(planResult.diagnostic, 1200)}`}); role team cannot continue`)
+  const stages = []
+  const comments = []
+  const decisions = []
+  const planAudits = []
+  beginRunState(callId, 'roles_run', oneLine(taskText, 300))
+  /**
+   * Every role invocation of this run passes through here, so the stage
+   * order is one code path and no stage can run outside it.
+   * @param {string} role role name
+   * @param {string} prompt complete prompt
+   * @returns {Promise<object>} role result
+   */
+  const stage = async (role, prompt) => {
+    beginRunStage(callId, role, runConfig.roles[role] ?? null)
+    try {
+      const result = await runRole(ctx, runConfig, { role, prompt, parent: agent, signal, cwd })
+      stages.push({ role, route: result.route, status: result.status, durationMs: result.durationMs })
+      endRunStage(callId, role, result.status, result.durationMs)
+      return result
+    } catch (error) {
+      endRunStage(callId, role, 'failed', 0)
+      throw error
     }
   }
-  const rounds = []
-  let feedback = []
-  let previousReport
-  for (let number = 1; number <= config.maxRounds; number += 1) {
-    if (signal !== undefined && signal.aborted) throw new Error('role team was cancelled')
-    const workerPrompt = buildWorkerPrompt({
-      task: taskText,
-      context,
-      plan: planText,
-      cwd,
-      round: number,
-      feedback,
-      previous: previousReport,
-      extra: config.prompts.worker,
-    })
-    const worker = await runRole(ctx, config, { role: 'worker', prompt: workerPrompt, parent: agent, signal, cwd })
-    previousReport = worker.text
-    const advisorPrompt = buildAdvisorPrompt({
-      task: taskText,
-      context,
-      plan: planText,
-      cwd,
-      workerReport: worker.text,
-      round: number,
-      feedback,
-      extra: config.prompts.advisor,
-    })
-    const advisor = await runRole(ctx, config, { role: 'advisor', prompt: advisorPrompt, parent: agent, signal, cwd })
-    const advisorVerdict = parseVerdict(advisor.text)
-    const round = { number, worker, advisor, advisorVerdict }
-    if (!advisorVerdict.approved) {
-      rounds.push(round)
-      feedback = feedbackLines(advisorVerdict.issues)
-      if (feedback.length === 0) feedback = ['[major] ADVISOR did not approve and returned no issue details; inspect the workspace and retry.']
-      continue
-    }
-    const reviewerPrompt = buildReviewerPrompt({
-      task: taskText,
-      context,
-      plan: planText,
-      cwd,
-      workerReport: worker.text,
-      advisorVerdict: advisor.text,
-      extra: config.prompts.reviewer,
-    })
-    const reviewer = await runRole(ctx, config, { role: 'reviewer', prompt: reviewerPrompt, parent: agent, signal, cwd })
-    const reviewerVerdict = parseVerdict(reviewer.text)
-    round.reviewer = reviewer
-    round.reviewerVerdict = reviewerVerdict
-    rounds.push(round)
-    if (reviewerVerdict.approved) {
-      return {
-        status: 'approved',
-        plan: planText,
-        rounds,
-        report: buildTeamReport({ status: 'approved', config, plan: planText, rounds, startedAt, task: taskText }),
+  try {
+    let planText = typeof plan === 'string' ? plan.trim() : ''
+    if (planText === '') {
+      const planResult = await stage('plan', buildPlanPrompt({ task: taskText, context, cwd, extra: runConfig.prompts.plan }))
+      planText = planResult.text.trim()
+      if (planText === '') {
+        throw new Error(`PLAN finished without a plan (${planResult.status}${planResult.diagnostic === undefined ? '' : `: ${clip(planResult.diagnostic, 1200)}`}); role team cannot continue`)
       }
     }
-    feedback = feedbackLines(reviewerVerdict.issues)
-    if (feedback.length === 0) feedback = ['[major] REVIEWER did not approve and returned no issue details; inspect the workspace and retry.']
-  }
-  return {
-    status: 'unapproved',
-    plan: planText,
-    rounds,
-    report: buildTeamReport({ status: 'unapproved', config, plan: planText, rounds, startedAt, task: taskText }),
+    // Plan audit: the ADVISOR judges the plan itself before WORKER starts;
+    // a rejected plan is revised from the advisor's issues, and whatever
+    // still stands when the passes run out reaches the WORKER prompt.
+    let planIssues = []
+    for (let pass = 1; pass <= runConfig.maxPlanPasses; pass += 1) {
+      if (signal !== undefined && signal.aborted) throw new Error('role team was cancelled')
+      const audit = await stage('advisor', buildPlanAuditPrompt({ task: taskText, context, plan: planText, cwd, extra: runConfig.prompts.advisor }))
+      const auditVerdict = parseVerdict(audit.text)
+      planAudits.push({ pass, route: audit.route, durationMs: audit.durationMs, verdict: auditVerdict })
+      comments.push({ role: 'advisor', stage: `plan audit ${pass}`, route: audit.route, approved: auditVerdict.approved, summary: auditVerdict.summary, issues: auditVerdict.issues })
+      if (auditVerdict.approved) {
+        planIssues = []
+        break
+      }
+      planIssues = feedbackLines(auditVerdict.issues)
+      if (pass < runConfig.maxPlanPasses) {
+        const revision = await stage('plan', buildPlanRevisionPrompt({ task: taskText, context, plan: planText, issues: planIssues, cwd, extra: runConfig.prompts.plan }))
+        const revised = revision.text.trim()
+        if (revised !== '') planText = revised
+      }
+    }
+    const rounds = []
+    let feedback = [...planIssues]
+    let previousReport
+    let attemptLimit = Math.max(1, Math.min(runConfig.maxRounds, LIMITS.maxRounds))
+    let number = 0
+    let status = 'unapproved'
+    let note
+    // The round loop. The only exits are the REVIEWER's approval, the user's
+    // exhaustion decision, and the hard attempt cap.
+    for (;;) {
+      if (signal !== undefined && signal.aborted) throw new Error('role team was cancelled')
+      if (number >= attemptLimit) {
+        const decision = await decideOnExhaustion(ctx, agent, signal)
+        if (decision.kind === 'model') {
+          const route = await askWorkerModelRoute(ctx, agent, signal)
+          if (route === undefined) {
+            decisions.push({ choice: 'model', note: 'no worker model was chosen' })
+            status = 'unapproved'
+            note = 'no worker model was chosen, so the run ended NOT APPROVED'
+            break
+          }
+          try {
+            await validateRoute(ctx, 'worker', route, signal)
+          } catch (error) {
+            decisions.push({ choice: 'model', route, note: `the chosen route is not usable: ${messageOf(error)}` })
+            status = 'unapproved'
+            note = 'the chosen worker route is not usable, so the run ended NOT APPROVED'
+            break
+          }
+          runConfig.roles.worker = route
+          decisions.push({ choice: 'model', route })
+        } else {
+          decisions.push({ choice: decision.kind, ...(decision.note === undefined ? {} : { note: decision.note }) })
+        }
+        if (decision.kind === 'continue') {
+          status = 'continued'
+          break
+        }
+        if (decision.kind === 'stop' || decision.kind === 'none') {
+          status = 'unapproved'
+          if (decision.note !== undefined) note = decision.note
+          break
+        }
+        if (attemptLimit + 3 > LIMITS.maxWorkerAttempts) {
+          status = 'unapproved'
+          note = `the hard cap of ${LIMITS.maxWorkerAttempts} worker attempts was reached, so no more rounds could be granted`
+          break
+        }
+        attemptLimit += 3
+        continue
+      }
+      number += 1
+      const workerPrompt = buildWorkerPrompt({
+        task: taskText,
+        context,
+        plan: planText,
+        cwd,
+        round: number,
+        feedback,
+        previous: previousReport,
+        extra: runConfig.prompts.worker,
+      })
+      const worker = await stage('worker', workerPrompt)
+      previousReport = worker.text
+      const advisorPrompt = buildAdvisorPrompt({
+        task: taskText,
+        context,
+        plan: planText,
+        cwd,
+        workerReport: worker.text,
+        round: number,
+        feedback,
+        extra: runConfig.prompts.advisor,
+      })
+      const advisor = await stage('advisor', advisorPrompt)
+      const advisorVerdict = parseVerdict(advisor.text)
+      const round = { number, worker, advisor, advisorVerdict }
+      comments.push({ role: 'advisor', stage: `round ${number} attempt`, route: advisor.route, approved: advisorVerdict.approved, summary: advisorVerdict.summary, issues: advisorVerdict.issues })
+      if (!advisorVerdict.approved) {
+        rounds.push(round)
+        feedback = feedbackLines(advisorVerdict.issues)
+        if (feedback.length === 0) feedback = ['[major] ADVISOR did not approve and returned no issue details; inspect the workspace and retry.']
+        continue
+      }
+      const reviewerPrompt = buildReviewerPrompt({
+        task: taskText,
+        context,
+        plan: planText,
+        cwd,
+        workerReport: worker.text,
+        advisorVerdict: advisor.text,
+        extra: runConfig.prompts.reviewer,
+      })
+      const reviewer = await stage('reviewer', reviewerPrompt)
+      const reviewerVerdict = parseVerdict(reviewer.text)
+      round.reviewer = reviewer
+      round.reviewerVerdict = reviewerVerdict
+      rounds.push(round)
+      comments.push({ role: 'reviewer', stage: `round ${number} final gate`, route: reviewer.route, approved: reviewerVerdict.approved, summary: reviewerVerdict.summary, issues: reviewerVerdict.issues })
+      if (reviewerVerdict.approved) {
+        status = 'approved'
+        break
+      }
+      feedback = feedbackLines(reviewerVerdict.issues)
+      if (feedback.length === 0) feedback = ['[major] REVIEWER did not approve and returned no issue details; inspect the workspace and retry.']
+    }
+    const report = buildTeamReport({ status, config: runConfig, plan: planText, rounds, comments, decisions, startedAt, task: taskText, note })
+    return {
+      status,
+      plan: planText,
+      planAudits,
+      rounds,
+      stages,
+      comments,
+      decisions,
+      report,
+    }
+  } finally {
+    endRunState(callId)
   }
 }
 
@@ -932,16 +1337,97 @@ function renderText(_args, value) {
   return [{ type: 'text', text: value.text }]
 }
 
-/** Canonical output schema for every tool in this plugin. */
-const TEXT_OUTPUT = Object.freeze({
-  schema: Object.freeze({
+/** A JSON Schema fragment that accepts any value, for nullable optional fields. */
+const LOOSE = Object.freeze({})
+
+/** Canonical output of one single-role tool: the report text plus the stage facts. */
+function singleRoleOutput(tool) {
+  return {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['text'],
+      properties: {
+        text: { type: 'string' },
+        role: { type: 'string' },
+        route: LOOSE,
+        status: { type: 'string' },
+        durationMs: { type: 'number' },
+        verdict: LOOSE,
+      },
+    },
+    render: renderText,
+    presentationMeta: (_args, value) => ({
+      v: 1,
+      tool,
+      role: value.role,
+      route: value.route ?? null,
+      status: value.status,
+      durationMs: value.durationMs,
+      ...(value.verdict === undefined ? {} : { verdict: value.verdict }),
+    }),
+  }
+}
+
+/** Canonical output of `roles_run`: the report text plus the run's structure. */
+const RUN_OUTPUT = {
+  schema: {
     type: 'object',
-    properties: Object.freeze({ text: Object.freeze({ type: 'string' }) }),
-    required: Object.freeze(['text']),
     additionalProperties: false,
-  }),
+    required: ['text'],
+    properties: {
+      text: { type: 'string' },
+      status: { type: 'string' },
+      task: { type: 'string' },
+      plan: { type: 'string' },
+      planAudits: { type: 'array', items: LOOSE },
+      stages: { type: 'array', items: LOOSE },
+      comments: { type: 'array', items: LOOSE },
+      decisions: { type: 'array', items: LOOSE },
+      rounds: { type: 'array', items: LOOSE },
+    },
+  },
   render: renderText,
-})
+  presentationMeta: (_args, value) => ({
+    v: 1,
+    tool: 'roles_run',
+    status: value.status,
+    task: value.task,
+    stages: value.stages ?? [],
+    comments: value.comments ?? [],
+    decisions: value.decisions ?? [],
+  }),
+}
+
+/**
+ * Run one role for a single-role tool while tracking it in the live run state.
+ * @param {object} ctx Host context
+ * @param {object} config resolved configuration
+ * @param {object} params run parameters
+ * @param {string} params.tool calling tool name
+ * @param {string} params.task task text (for the live state)
+ * @param {string} params.role role name
+ * @param {string} params.prompt complete prompt
+ * @param {object} params.agent calling DSH agent
+ * @param {AbortSignal} params.signal cancellation
+ * @param {string | undefined} params.cwd working directory
+ * @param {string | undefined} params.callId tool call id
+ * @returns {Promise<object>} role result
+ */
+async function runTrackedRole(ctx, config, { tool, task, role, prompt, agent, signal, cwd, callId }) {
+  beginRunState(callId, tool, oneLine(task, 300))
+  beginRunStage(callId, role, config.roles[role] ?? null)
+  try {
+    const result = await runRole(ctx, config, { role, prompt, parent: agent, signal, cwd })
+    endRunStage(callId, role, result.status, result.durationMs)
+    return result
+  } catch (error) {
+    endRunStage(callId, role, 'failed', 0)
+    throw error
+  } finally {
+    endRunState(callId)
+  }
+}
 
 /**
  * Register one tool with a caller context.
@@ -963,19 +1449,19 @@ function buildTools(ctx, config) {
   const tools = []
   tools.push({
     name: 'roles_run',
-    description: 'Run the full PLAN -> WORKER -> ADVISOR -> REVIEWER team on one self-contained task and wait for the outcome. PLAN writes the plan, WORKER implements it in this shared workspace, ADVISOR audits every attempt from a different model family, and REVIEWER performs the final independent gate only after WORKER reports completion and ADVISOR approves. Rejected attempts are sent back to WORKER with the issues, up to the configured round limit. The roles start as fresh agents without this conversation, so include every task detail, path, constraint and acceptance check they need. This call can take several minutes; it returns the plan, each attempt, each verdict and the final status.',
+    description: 'Run the full PLAN -> WORKER -> ADVISOR -> REVIEWER team on one self-contained task and wait for the outcome. PLAN writes a rigorous plan, the ADVISOR audits that plan before WORKER starts (a rejected plan is revised from the advisor\'s issues), WORKER implements it in this shared workspace, ADVISOR audits every attempt from a different model family, and REVIEWER is the final gate whose approval is the only approved outcome. Rejected attempts are sent back to WORKER with the issues, up to the configured round limit; when the rounds run out without approval the run asks the user how to proceed (continue without approval, more rounds, a different worker model, or stop). The roles start as fresh agents without this conversation, so include every task detail, path, constraint and acceptance check they need. This call can take several minutes; it returns the plan, each attempt, each verdict and the final status.',
     parameters: {
       type: 'object',
       properties: {
         task: { type: 'string', description: 'The complete task for the team, ideally the user request verbatim plus the exact acceptance criteria.' },
         context: { type: 'string', description: 'Additional facts the roles need: relevant files, constraints, prior decisions, environment notes. The roles do not see this conversation.' },
-        plan: { type: 'string', description: 'Optional existing plan. When supplied, PLAN is skipped and WORKER implements this plan directly.' },
+        plan: { type: 'string', description: 'Optional existing plan. When supplied, PLAN is skipped, the plan is audited by the ADVISOR, and WORKER implements it directly.' },
         max_rounds: { type: 'integer', description: 'Override the configured worker-attempt limit (1-6).' },
       },
       required: ['task'],
       additionalProperties: false,
     },
-    output: TEXT_OUTPUT,
+    output: RUN_OUTPUT,
     async execute(args, exec) {
       if (exec.agent === undefined) throw new Error('roles_run needs a calling agent')
       const task = stringArg(args, 'task', { required: true })
@@ -992,8 +1478,24 @@ function buildTools(ctx, config) {
         plan,
         signal: exec.signal,
         config: effectiveConfig,
+        callId: exec.callId,
       })
-      return { text: outcome.report }
+      return {
+        text: outcome.report,
+        status: outcome.status,
+        task: oneLine(task, 300),
+        plan: clip(outcome.plan, LIMITS.planChars),
+        planAudits: outcome.planAudits.map(audit => ({ pass: audit.pass, route: audit.route, durationMs: audit.durationMs, verdict: audit.verdict })),
+        stages: outcome.stages,
+        comments: outcome.comments,
+        decisions: outcome.decisions,
+        rounds: outcome.rounds.map(round => ({
+          number: round.number,
+          worker: { role: 'worker', route: round.worker.route, status: round.worker.status, durationMs: round.worker.durationMs },
+          advisor: { role: 'advisor', route: round.advisor.route, status: round.advisor.status, durationMs: round.advisor.durationMs },
+          ...(round.reviewer === undefined ? {} : { reviewer: { role: 'reviewer', route: round.reviewer.route, status: round.reviewer.status, durationMs: round.reviewer.durationMs } }),
+        })),
+      }
     },
   })
   tools.push({
@@ -1008,21 +1510,24 @@ function buildTools(ctx, config) {
       required: ['task'],
       additionalProperties: false,
     },
-    output: TEXT_OUTPUT,
+    output: singleRoleOutput('role_plan'),
     async execute(args, exec) {
       if (exec.agent === undefined) throw new Error('role_plan needs a calling agent')
       const task = stringArg(args, 'task', { required: true })
       const context = stringArg(args, 'context', { max: 30_000 })
       const cwd = ctx.get('workingDirectory')?.get?.(exec.agent.session)
       if (config.roles.plan !== null) await validateRoute(ctx, 'plan', config.roles.plan, exec.signal)
-      const result = await runRole(ctx, config, {
+      const result = await runTrackedRole(ctx, config, {
+        tool: 'role_plan',
+        task,
         role: 'plan',
         prompt: buildPlanPrompt({ task, context, cwd, extra: config.prompts.plan }),
-        parent: exec.agent,
+        agent: exec.agent,
         signal: exec.signal,
         cwd,
+        callId: exec.callId,
       })
-      return { text: formatRoleResult(result) }
+      return structuredRoleResult(result)
     },
   })
   tools.push({
@@ -1039,7 +1544,7 @@ function buildTools(ctx, config) {
       required: ['task'],
       additionalProperties: false,
     },
-    output: TEXT_OUTPUT,
+    output: singleRoleOutput('role_worker'),
     async execute(args, exec) {
       if (exec.agent === undefined) throw new Error('role_worker needs a calling agent')
       const task = stringArg(args, 'task', { required: true })
@@ -1048,7 +1553,9 @@ function buildTools(ctx, config) {
       const context = stringArg(args, 'context', { max: 30_000 })
       const cwd = ctx.get('workingDirectory')?.get?.(exec.agent.session)
       if (config.roles.worker !== null) await validateRoute(ctx, 'worker', config.roles.worker, exec.signal)
-      const result = await runRole(ctx, config, {
+      const result = await runTrackedRole(ctx, config, {
+        tool: 'role_worker',
+        task,
         role: 'worker',
         prompt: buildWorkerPrompt({
           task,
@@ -1060,12 +1567,13 @@ function buildTools(ctx, config) {
           previous: undefined,
           extra: config.prompts.worker,
         }),
-        parent: exec.agent,
+        agent: exec.agent,
         signal: exec.signal,
         cwd,
+        callId: exec.callId,
       })
       if (result.status === 'completed') workerReportedDone.add(exec.agent)
-      return { text: formatRoleResult(result) }
+      return structuredRoleResult(result)
     },
   })
   tools.push({
@@ -1082,7 +1590,7 @@ function buildTools(ctx, config) {
       required: ['task'],
       additionalProperties: false,
     },
-    output: TEXT_OUTPUT,
+    output: singleRoleOutput('role_advisor'),
     async execute(args, exec) {
       if (exec.agent === undefined) throw new Error('role_advisor needs a calling agent')
       const task = stringArg(args, 'task', { required: true })
@@ -1091,14 +1599,17 @@ function buildTools(ctx, config) {
       const context = stringArg(args, 'context', { max: 20_000 })
       const cwd = ctx.get('workingDirectory')?.get?.(exec.agent.session)
       if (config.roles.advisor !== null) await validateRoute(ctx, 'advisor', config.roles.advisor, exec.signal)
-      const result = await runRole(ctx, config, {
+      const result = await runTrackedRole(ctx, config, {
+        tool: 'role_advisor',
+        task,
         role: 'advisor',
         prompt: buildAdvisorPrompt({ task, context, plan, cwd, workerReport, round: 1, extra: config.prompts.advisor }),
-        parent: exec.agent,
+        agent: exec.agent,
         signal: exec.signal,
         cwd,
+        callId: exec.callId,
       })
-      return { text: formatRoleResult(result) }
+      return structuredRoleResult(result, parseVerdict(result.text))
     },
   })
   tools.push({
@@ -1116,7 +1627,7 @@ function buildTools(ctx, config) {
       required: ['task'],
       additionalProperties: false,
     },
-    output: TEXT_OUTPUT,
+    output: singleRoleOutput('role_reviewer'),
     async execute(args, exec) {
       if (exec.agent === undefined) throw new Error('role_reviewer needs a calling agent')
       if (!workerReportedDone.has(exec.agent)) {
@@ -1129,14 +1640,17 @@ function buildTools(ctx, config) {
       const context = stringArg(args, 'context', { max: 20_000 })
       const cwd = ctx.get('workingDirectory')?.get?.(exec.agent.session)
       if (config.roles.reviewer !== null) await validateRoute(ctx, 'reviewer', config.roles.reviewer, exec.signal)
-      const result = await runRole(ctx, config, {
+      const result = await runTrackedRole(ctx, config, {
+        tool: 'role_reviewer',
+        task,
         role: 'reviewer',
         prompt: buildReviewerPrompt({ task, context, plan, cwd, workerReport, advisorVerdict, extra: config.prompts.reviewer }),
-        parent: exec.agent,
+        agent: exec.agent,
         signal: exec.signal,
         cwd,
+        callId: exec.callId,
       })
-      return { text: formatRoleResult(result) }
+      return structuredRoleResult(result, parseVerdict(result.text))
     },
   })
   return tools
@@ -1421,7 +1935,7 @@ function roleTable(config) {
     for (const warning of warnings) lines.push(`Warning: ${warning}`)
   }
   lines.push('')
-  lines.push('Commands: /roles set <role> <provider>/<model>[:effort] · /roles reset <role> · /roles models [provider] · /roles doctor · /roles run <task>')
+  lines.push('Commands: /roles set <role> <provider>/<model>[:effort] · /roles reset <role> · /roles models [provider] · /roles doctor · /roles run <task> · /role-plan <task or plan.md>')
   return lines.join('\n')
 }
 
@@ -1601,6 +2115,114 @@ function registerRolesCommand(ctx, config) {
   }))
 }
 
+/**
+ * Execute one `/role-plan` command line: a task, or a Markdown plan file.
+ *
+ * A `.md` argument is read as the plan (absolute, or relative to the session
+ * workspace, e.g. a Jev plan artifact) and PLAN is skipped; anything else is
+ * the task text and PLAN writes the plan. Both forms drive the complete
+ * pipeline through `runRoleTeam`.
+ *
+ * @param {object} ctx Host context
+ * @param {object} config resolved configuration
+ * @param {{ agent: object, rawInput: string, signal: AbortSignal }} invocation command invocation
+ * @returns {Promise<{ kind: 'success' | 'error', text: string }>} command result
+ */
+export async function handleRolePlanCommand(ctx, config, invocation) {
+  const raw = typeof invocation.rawInput === 'string' ? invocation.rawInput.trim() : ''
+  if (raw === '') {
+    return {
+      kind: 'error',
+      text: 'usage: /role-plan <task or plan.md> — with a task, PLAN writes the plan; with a path to a .md plan file (for example a Jev plan artifact), the plan is read from the file and PLAN is skipped.',
+    }
+  }
+  let plan
+  let task = raw
+  if (/\.md$/i.test(raw)) {
+    const session = invocation.agent?.session
+    const base = ctx.get('workingDirectory')?.get?.(session)
+    const path = isAbsolute(raw) ? raw : resolvePath(base ?? process.cwd(), raw)
+    let content
+    try {
+      content = await readFile(path, 'utf8')
+    } catch (error) {
+      return {
+        kind: 'error',
+        text: `could not read the plan file "${raw}": ${messageOf(error)}; give an absolute path or a path relative to the session workspace`,
+      }
+    }
+    if (content.trim() === '') return { kind: 'error', text: `the plan file "${raw}" is empty` }
+    if (content.length > LIMITS.planFileMaxChars) {
+      return { kind: 'error', text: `the plan file "${raw}" is larger than ${LIMITS.planFileMaxChars} characters; split it or pass the essential part as text` }
+    }
+    plan = clip(content, LIMITS.planChars)
+    task = `Execute the plan in ${raw} exactly.`
+  }
+  try {
+    const outcome = await runRoleTeam(ctx, {
+      agent: invocation.agent,
+      task,
+      ...(plan === undefined ? {} : { plan }),
+      signal: invocation.signal,
+      config,
+    })
+    return { kind: outcome.status === 'approved' || outcome.status === 'continued' ? 'success' : 'error', text: outcome.report }
+  } catch (error) {
+    return { kind: 'error', text: messageOf(error) }
+  }
+}
+
+/**
+ * Register the `/role-plan` command when the commands service is available.
+ * @param {object} ctx Host context
+ * @param {object} config resolved configuration
+ * @returns {void}
+ */
+function registerRolePlanCommand(ctx, config) {
+  const commands = ctx.get('commands')
+  if (commands === undefined || commands === null || typeof commands.register !== 'function') return
+  ctx.effect(() => commands.register({
+    name: 'role-plan',
+    description: 'Run the full role team on a task or a plan file: the ADVISOR audits the plan, WORKER implements it, ADVISOR checks every attempt, and REVIEWER gives the final verdict.',
+    input: { hint: '<task or plan.md>' },
+    handler: invocation => handleRolePlanCommand(ctx, config, invocation),
+  }))
+}
+
+/* ------------------------------------------------------------------------- *
+ * Live run-state route
+ * ------------------------------------------------------------------------- */
+
+/** Same-origin prefix route serving the live state of one run. */
+const RUN_STATE_ROUTE = '/plugin-api/role-team/run'
+
+/**
+ * Serve the live run state of one tool call over the plugin API.
+ *
+ * GET-only (the webserver answers anything else itself), loopback-guarded,
+ * never cached; unknown ids answer 404 so a settled or replayed call stops
+ * polling immediately.
+ *
+ * @param {object} ctx Host context
+ * @param {Request} request incoming Fetch request
+ * @returns {Response} JSON response
+ */
+export function handleRunStateRequest(ctx, request) {
+  if (!trustedRoleRouteRequest(request)) return roleRouteJson({ ok: false, error: 'forbidden' }, 403)
+  let callId = ''
+  try {
+    const url = new URL(request.url)
+    const rest = url.pathname.slice(RUN_STATE_ROUTE.length)
+    callId = rest === '' ? '' : decodeURIComponent(rest.replace(/^\//, ''))
+  } catch {
+    return roleRouteJson({ ok: false, error: 'bad request' }, 400)
+  }
+  if (callId === '' || callId.includes('/')) return roleRouteJson({ ok: false, error: 'unknown run' }, 404)
+  const run = runStates.get(callId)
+  if (run === undefined) return roleRouteJson({ ok: false, error: 'unknown run' }, 404)
+  return roleRouteJson({ ok: true, run: cloneJson(run) })
+}
+
 /* ------------------------------------------------------------------------- *
  * Plugin entry
  * ------------------------------------------------------------------------- */
@@ -1618,12 +2240,18 @@ export function apply(ctx, rawConfig = {}) {
   }
   for (const tool of buildTools(ctx, config)) registerTool(ctx, tool)
   registerRolesCommand(ctx, config)
+  registerRolePlanCommand(ctx, config)
   ctx.inject(['webServer'], routeCtx => {
     routeCtx.effect(() => routeCtx.webServer.register({
       kind: 'exact',
       path: ROLES_SETTINGS_ROUTE,
       handler: (req, res) => handleRolesHttp(ctx, req, res, rawConfig),
     }), 'role-team: settings route')
+    routeCtx.effect(() => routeCtx.webServer.register({
+      kind: 'prefix',
+      path: RUN_STATE_ROUTE,
+      resource: request => handleRunStateRequest(ctx, request),
+    }), 'role-team: run state route')
   })
   const order = typeof ctx.systemPrompt?.getSectionOrder === 'function'
     ? ctx.systemPrompt.getSectionOrder('TOOL_SUBAGENT') + 10
