@@ -1,0 +1,17 @@
+# Role team bundle: one Host row that registers the role tools, the
+# orchestrated PLAN -> WORKER -> ADVISOR -> REVIEWER loop, the role guidance
+# prompt section, and the /roles command.
+#
+# Role routes use the recommended cross-family defaults in the plugin's code.
+# Override a role with `/roles set` or Settings -> Models; the override is
+# written to the profile patch, so the code defaults stay authoritative for
+# every role the user has not changed. A role set to null inherits the session
+# model.
+- insert:
+    - id: role-team
+      name: '@local/dsh-role-team'
+      config:
+        # Role routes live in the plugin's code as recommended defaults; a role
+        # is written here only when /roles set or the Settings page overrides it.
+        maxRounds: 3
+        childMaxDepth: 2

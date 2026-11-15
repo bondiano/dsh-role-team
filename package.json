@@ -1,0 +1,35 @@
+{
+  "name": "@local/dsh-role-team",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Role team for DeepSeek Harness: PLAN, WORKER, ADVISOR and REVIEWER agents with independently configured models and providers, an orchestrated work loop, a Settings → Models role picker, and a /roles command.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "README.md",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-models"
+      ]
+    }
+  }
+}

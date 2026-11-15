@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Role team",
+    "description": "Adds four model-routed agents that work as one team: PLAN writes the plan, WORKER implements it in the shared workspace, ADVISOR audits every attempt from a different model family, and REVIEWER is the final independent gate that runs only after the worker reports completion and the advisor approves. roles_run drives the loop and feeds every issue back to the worker; role_plan, role_worker, role_advisor and role_reviewer run a single role. Settings → Models gains a Role team section with the current model for each role, a provider/model picker over the live adapter catalogue, reasoning-effort selection, per-role reset, and independence warnings. /roles offers the same routes from chat. Role children are fresh agents with the session's tools and permission policy.",
+    "detail": "docs/DETAIL.md"
+  }
+}

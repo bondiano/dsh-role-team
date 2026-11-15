@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Four connected role agents: plan, worker, advisor and reviewer">
+  <rect x="3" y="3" width="58" height="58" rx="13" fill="#f4f8fc" stroke="#247bbf" stroke-width="2.5"/>
+  <path d="M32 20l14.5 14.5M46.5 29.5L32 44M25.5 44L11 29.5M11 26.5L25.5 12" stroke="#9db9cf" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+  <path d="M47 20l-3.2 7.4-4.2-6.6z" fill="#9db9cf"/>
+  <path d="M46 45l-7.4-3.2 6.6-4.2z" fill="#9db9cf"/>
+  <path d="M17 45l3.2-7.4 4.2 6.6z" fill="#9db9cf"/>
+  <path d="M18 20l7.4 3.2-6.6 4.2z" fill="#9db9cf"/>
+  <circle cx="32" cy="13" r="8" fill="#f0b451" stroke="#c9891f" stroke-width="2"/>
+  <circle cx="51" cy="32" r="8" fill="#3fa46a" stroke="#2b7d4d" stroke-width="2"/>
+  <circle cx="32" cy="51" r="8" fill="#7b62c9" stroke="#5a45a0" stroke-width="2"/>
+  <circle cx="13" cy="32" r="8" fill="#2f7fc1" stroke="#1f5f93" stroke-width="2"/>
+  <g fill="#ffffff" font-family="ui-sans-serif, system-ui, sans-serif" font-size="9" font-weight="700" text-anchor="middle">
+    <text x="32" y="16.5">P</text>
+    <text x="51" y="35.5">A</text>
+    <text x="32" y="54.5">R</text>
+    <text x="13" y="35.5">W</text>
+  </g>
+</svg>
