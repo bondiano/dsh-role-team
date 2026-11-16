@@ -19,6 +19,8 @@ window.__ModuleLoader__.load({
 
     /** Same-origin route served by the Host half. */
     const ROUTE = '/plugin-api/role-team/roles'
+    /** Same-origin route naming a session `/role-plan` just created. */
+    const PLAN_SESSION_ROUTE = '/plugin-api/role-team/plan-session'
     /** Locale namespace owned by this plugin. */
     const NS = 'roleTeam'
     /** The four roles, in pipeline order. */
@@ -62,6 +64,10 @@ window.__ModuleLoader__.load({
       chooseTitle: 'Choose the model for {role}',
       search: 'Search models',
       providers: 'Providers',
+      runtime: 'Agent runtime',
+      runtimeNative: 'Native DSH',
+      externalModel: 'Runtime model ID',
+      externalModelHint: 'Enter a model available to this runtime. The list below provides suggestions from DSH providers.',
       models: 'Models',
       noModels: 'No models match.',
       effort: 'Reasoning effort',
@@ -123,6 +129,10 @@ window.__ModuleLoader__.load({
       chooseTitle: 'Выберите модель для {role}',
       search: 'Поиск моделей',
       providers: 'Провайдеры',
+      runtime: 'Среда агента',
+      runtimeNative: 'Нативный DSH',
+      externalModel: 'ID модели runtime',
+      externalModelHint: 'Введите модель, доступную выбранному runtime. Ниже — подсказки из каталога DSH.',
       models: 'Модели',
       noModels: 'Нет подходящих моделей.',
       effort: 'Уровень рассуждений',
@@ -184,6 +194,10 @@ window.__ModuleLoader__.load({
       chooseTitle: '为 {role} 选择模型',
       search: '搜索模型',
       providers: '提供商',
+      runtime: '代理运行时',
+      runtimeNative: '原生 DSH',
+      externalModel: '运行时模型 ID',
+      externalModelHint: '输入此运行时可用的模型。下方列表提供 DSH 模型建议。',
       models: '模型',
       noModels: '没有匹配的模型。',
       effort: '推理强度',
@@ -323,6 +337,10 @@ window.__ModuleLoader__.load({
 }
 @media (hover: hover) { .dsh-rt-close:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); } }
 .dsh-rt-dialog-body { display: grid; grid-template-columns: 168px minmax(0, 1fr); flex: 1; min-height: 0; }
+.dsh-rt-runtime { display: flex; align-items: center; gap: 12px; padding: 12px 20px; color: var(--dsw-alias-label-primary); }
+.dsh-rt-runtime select { font: inherit; padding: 6px 10px; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l3); border-radius: 6px; }
+.dsh-rt-runtime select:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-rt-runtime-model { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; }
 .dsh-rt-providers { display: flex; flex-direction: column; gap: 2px; padding: 8px; overflow: auto; border-right: 0.5px solid var(--dsw-alias-border-l3); }
 .dsh-rt-provider {
   box-sizing: border-box; width: 100%; padding: 8px 9px; border: none; border-radius: var(--dsw-radius-sm);
@@ -516,6 +534,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Ask the Host whether a just-added session is a `/role-plan` session, and
+     * open it when it is. Every failure stays silent: the session is still in
+     * the list, and switching to it is a convenience, not part of the run.
+     * @param {object} ctx browser plugin context
+     * @param {string} sessionId identity from `api-session/added`
+     * @returns {Promise<void>} resolves after the check
+     */
+    async function openPlanSession(ctx, sessionId) {
+      try {
+        const response = await fetch(`${PLAN_SESSION_ROUTE}/${encodeURIComponent(sessionId)}`, {
+          credentials: 'same-origin',
+          headers: { accept: 'application/json' },
+        })
+        if (!response.ok) return
+        const data = await response.json()
+        if (data === null || typeof data !== 'object' || data.ok !== true) return
+        ctx.uiWorkspace?.openSession?.(sessionId)
+      } catch {
+        // A failed claim only costs the automatic switch.
+      }
+    }
+
+    /**
      * Localized family-independence warnings for the settings rows.
      * @param {object | undefined} roles snapshot roles
      * @param {(key: string, params?: object) => string} t translator
@@ -571,7 +612,7 @@ window.__ModuleLoader__.load({
       const route = info?.route ?? null
       const group = route === null ? undefined : groupOf(catalog, route.provider)
       const model = modelOf(catalog, route)
-      const available = route === null || (group !== undefined && model !== undefined)
+      const available = route === null || (route.runtime && route.runtime !== 'native') || (group !== undefined && model !== undefined)
       const sourceKey = info?.source === 'config' ? 'custom' : info?.source === 'inherit' ? 'inherit' : 'recommended'
       return h('div', { className: 'dsh-rt-row', 'data-role': role },
         h('div', { className: 'dsh-rt-role' },
@@ -587,7 +628,7 @@ window.__ModuleLoader__.load({
           route === null
             ? null
             : h('span', { className: 'dsh-rt-route' },
-              `${group?.name ?? route.provider} / ${route.model}${route.reasoningEffort === undefined ? '' : ` · ${route.reasoningEffort}`}`),
+              `${route.runtime && route.runtime !== 'native' ? `${route.runtime} · ` : ''}${group?.name ?? route.provider} / ${route.model}${route.reasoningEffort === undefined ? '' : ` · ${route.reasoningEffort}`}`),
           !available && route !== null
             ? h('span', { className: 'dsh-rt-warn', title: t('modelUnavailable') }, t('unavailable'))
             : null,
@@ -621,14 +662,16 @@ window.__ModuleLoader__.load({
       const currentGroup = current === null ? undefined : groupOf(catalog, current.provider)
       const currentModel = modelOf(catalog, current)
       const initialProvider = currentGroup?.id ?? groups[0]?.id ?? ''
+      const [runtime, setRuntime] = React.useState(current?.runtime ?? 'native')
+      const external = runtime !== 'native'
       const [provider, setProvider] = React.useState(initialProvider)
       const [model, setModel] = React.useState(
-        current !== null && current.provider === initialProvider && currentModel !== undefined
+        current !== null && ((current.runtime && current.runtime !== 'native') || (current.provider === initialProvider && currentModel !== undefined))
           ? current.model
           : groupOf(catalog, initialProvider)?.models?.[0]?.id ?? '',
       )
       const [effort, setEffort] = React.useState(
-        current !== null && current.provider === initialProvider && currentModel !== undefined
+        current !== null && ((current.runtime && current.runtime !== 'native') || (current.provider === initialProvider && currentModel !== undefined))
           ? current.reasoningEffort
           : undefined,
       )
@@ -640,7 +683,7 @@ window.__ModuleLoader__.load({
       const visible = (group?.models ?? []).filter(candidate => needle === ''
         || candidate.name.toLowerCase().includes(needle)
         || candidate.id.toLowerCase().includes(needle))
-      const canApply = provider !== '' && model !== '' && !busy
+      const canApply = (external || provider !== '') && model.trim() !== '' && !busy
 
       const dialogRef = React.useRef(null)
       React.useEffect(() => {
@@ -675,8 +718,9 @@ window.__ModuleLoader__.load({
       const apply = () => {
         if (!canApply) return
         onApply({
-          provider,
-          model,
+          provider: external ? runtime : provider,
+          model: model.trim(),
+          ...(external ? { runtime } : {}),
           ...(typeof effort === 'string' && effort !== '' ? { reasoningEffort: effort } : {}),
         })
       }
@@ -690,6 +734,18 @@ window.__ModuleLoader__.load({
       h('div', { className: 'dsh-rt-dialog-head' },
         h('h3', { className: 'dsh-rt-dialog-title', id: 'dsh-rt-dialog-title' }, fill(t('chooseTitle'), { role: ROLE_LABEL[role] })),
         h('button', { type: 'button', className: 'dsh-rt-close', 'aria-label': t('close'), disabled: busy, onClick: onCancel }, '×')),
+      h('label', { className: 'dsh-rt-runtime' }, t('runtime'),
+        h('select', {
+          'aria-label': t('runtime'), value: runtime, disabled: busy,
+          onChange: event => {
+            const next = event.target.value
+            setRuntime(next); setEffort(undefined)
+            if (next === 'native' && !selected) setModel(group?.models?.[0]?.id ?? '')
+          },
+        },
+        h('option', { value: 'native' }, t('runtimeNative')),
+        h('option', { value: 'cursor' }, 'Cursor'),
+        h('option', { value: 'droid' }, 'Factory Droid'))),
       h('div', { className: 'dsh-rt-dialog-body' },
         h('div', { className: 'dsh-rt-providers', role: 'group', 'aria-label': t('providers') },
           groups.length === 0
@@ -703,6 +759,11 @@ window.__ModuleLoader__.load({
                 onClick: () => chooseProvider(candidate.id),
               }, candidate.name))),
         h('div', { className: 'dsh-rt-models' },
+          external ? h('label', { className: 'dsh-rt-runtime-model' }, t('externalModel'),
+            h('input', { className: 'dsh-rt-search', value: model, disabled: busy,
+              'aria-label': t('externalModel'), 'aria-describedby': 'dsh-rt-runtime-model-hint',
+              onChange: event => { setModel(event.target.value); setEffort(undefined) } }),
+            h('span', { id: 'dsh-rt-runtime-model-hint', className: 'dsh-rt-note' }, t('externalModelHint'))) : null,
           h('input', {
             className: 'dsh-rt-search',
             type: 'search',
@@ -1060,7 +1121,7 @@ window.__ModuleLoader__.load({
        */
       const routeText = route => (route == null || !isItem(route)
         ? t('inheritRoute')
-        : `${route.provider}/${route.model}${route.reasoningEffort === undefined ? '' : ` @${route.reasoningEffort}`}`)
+        : `${route.runtime && route.runtime !== 'native' ? `${route.runtime}:` : ''}${route.provider}/${route.model}${route.reasoningEffort === undefined ? '' : ` @${route.reasoningEffort}`}`)
 
       /**
        * One localized severity tag.
@@ -1165,7 +1226,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'locale', 'remote', 'remote.session'],
+      inject: ['slots', 'locale', 'remote', 'remote.session', 'uiWorkspace'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { en, ru, zh }), 'role-team: dictionaries')
         ctx.effect(() => {
@@ -1176,6 +1237,23 @@ window.__ModuleLoader__.load({
           document.head.append(style)
           return () => { style.remove() }
         }, 'role-team: styles')
+        ctx.effect(() => {
+          if (typeof ctx.remote?.$on !== 'function') return () => {}
+          let stop
+          try {
+            stop = ctx.remote.$on('api-session/added', summary => {
+              const sessionId = typeof summary === 'string'
+                ? summary
+                : summary !== null && typeof summary === 'object' && typeof summary.sessionId === 'string'
+                  ? summary.sessionId
+                  : ''
+              if (sessionId !== '') void openPlanSession(ctx, sessionId)
+            })
+          } catch {
+            return () => {}
+          }
+          return typeof stop === 'function' ? stop : () => {}
+        }, 'role-team: plan session navigation')
         const api = createApi(ctx)
         const t = ctx.locale.bind(NS)
         ctx.slots.inject('settings.models.footer', () => ctx.slots.register({

@@ -12,12 +12,14 @@
   },
   "files": [
     "index.js",
+    "runtime-role.js",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
     "docs",
     "README.md",
-    "icon.svg"
+    "icon.svg",
+    "web-route-auth.mjs"
   ],
   "dsh": {
     "bundle": {
@@ -32,5 +34,13 @@
         "@deepseek-ai/dsh-client-ui-tool"
       ]
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bondiano/dsh-role-team.git"
+  },
+  "homepage": "https://github.com/bondiano/dsh-role-team#readme",
+  "bugs": {
+    "url": "https://github.com/bondiano/dsh-role-team/issues"
   }
 }

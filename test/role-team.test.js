@@ -10,6 +10,7 @@ import {
   buildPlanPrompt,
   familyOf,
   formatRoute,
+  handlePlanSessionRequest,
   handleRolePlanCommand,
   handleRolesRoute,
   handleRunStateRequest,
@@ -32,6 +33,10 @@ function makeHarness(options = {}) {
   const tools = new Map()
   const commands = new Map()
   const calls = []
+  const created = []
+  const prompted = []
+  const renamed = []
+  const attached = []
   const entry = { id: 'role-team', options: { config: options.config ?? {} } }
   const responses = options.responses ?? {}
   const counters = new Map()
@@ -104,6 +109,30 @@ function makeHarness(options = {}) {
       },
     }
   }
+  if (options.sessionController !== false) {
+    services.sessionController = {
+      async create(request) {
+        created.push(request)
+        if (options.createError !== undefined) throw options.createError
+        return { sessionId: request.sessionId }
+      },
+      async prompt(request) {
+        prompted.push(request)
+        if (options.promptError !== undefined) throw options.promptError
+      },
+      async rename(request) {
+        renamed.push(request)
+        if (options.renameError !== undefined) throw options.renameError
+      },
+    }
+  }
+  if (options.workspace !== false) {
+    services.workspaceRegistry = {
+      async resolveByPath() {
+        return options.workspace ?? { attachSession: async sessionId => { attached.push(sessionId) } }
+      },
+    }
+  }
   const ctx = {
     fiber: { entry },
     logger: { info() {}, warn() {}, error() {} },
@@ -136,7 +165,7 @@ function makeHarness(options = {}) {
     if (deps.every(name => services[name] !== undefined)) callback(ctx)
   }
   apply(ctx, options.config ?? {})
-  return { ctx, tools, commands, calls, entry }
+  return { ctx, tools, commands, calls, created, prompted, renamed, attached, entry }
 }
 
 /** A strict JSON verdict for canned role output. */
@@ -583,19 +612,13 @@ test('the exhaustion retry respects the hard attempt cap', async () => {
   assert.deepEqual(outcome.decisions.map(decision => decision.choice), ['retry', 'retry', 'retry'])
 })
 
-test('/role-plan runs the team on a task and reads a plan file', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'role-plan-'))
-  const file = join(dir, 'plan.md')
-  await writeFile(file, '# Plan\n\n1. Edit a.js\n2. Test a.js\n', 'utf8')
+/** A loopback request for one plan-session marker. */
+function planRouteRequest(sessionId, headers = { host: '127.0.0.1:62592' }) {
+  return new Request(`http://127.0.0.1:62592/plugin-api/role-team/plan-session/${encodeURIComponent(sessionId)}`, { headers })
+}
 
-  const taskHarness = makeHarness({
-    responses: {
-      plan: ['STEPS:\n1. Implement Y'],
-      worker: ['CHANGES: done\nSTATUS: done'],
-      advisor: [verdict(true, [], 'plan ok'), verdict(true, [], 'work ok')],
-      reviewer: [verdict(true, [], 'approved')],
-    },
-  })
+test('/role-plan starts the run in a dedicated session instead of the current one', async () => {
+  const taskHarness = makeHarness({ cwd: '/workspace' })
   const command = taskHarness.commands.get('role-plan')
   assert.ok(command)
 
@@ -605,35 +628,98 @@ test('/role-plan runs the team on a task and reads a plan file', async () => {
 
   const taskRun = await command.handler({ agent: AGENT, rawInput: 'Implement Y', signal: SIGNAL })
   assert.equal(taskRun.kind, 'success')
-  assert.equal(taskHarness.calls.filter(call => call.role === 'plan').length, 1)
-  assert.match(taskRun.text, /APPROVED/)
+  assert.match(taskRun.text, /started in a new session/)
+  assert.equal(taskHarness.calls.length, 0, 'the current session runs no role')
 
-  const fileHarness = makeHarness({
-    cwd: dir,
-    responses: {
-      worker: ['CHANGES: done\nSTATUS: done'],
-      advisor: [verdict(true, [], 'plan ok'), verdict(true, [], 'work ok')],
-      reviewer: [verdict(true, [], 'approved')],
-    },
-  })
-  const fileCommand = fileHarness.commands.get('role-plan')
-  const fileRun = await fileCommand.handler({ agent: AGENT, rawInput: 'plan.md', signal: SIGNAL })
-  assert.equal(fileRun.kind, 'success')
-  assert.equal(fileHarness.calls.filter(call => call.role === 'plan').length, 0)
-  const worker = fileHarness.calls.find(call => call.role === 'worker')
-  assert.ok(worker.prompt.includes('1. Edit a.js'))
-  assert.ok(worker.prompt.includes('Execute the plan in plan.md exactly.'))
+  assert.equal(taskHarness.created.length, 1)
+  const sessionId = taskHarness.created[0].sessionId
+  assert.match(sessionId, /^session-/)
+  assert.equal(taskHarness.created[0].cwd, '/workspace')
+  assert.deepEqual(taskHarness.attached, [sessionId])
+  assert.equal(taskHarness.renamed.length, 1)
+  assert.match(taskHarness.renamed[0].title, /^Role plan: Implement Y$/)
 
-  const missing = await fileCommand.handler({ agent: AGENT, rawInput: 'no-such.md', signal: SIGNAL })
-  assert.equal(missing.kind, 'error')
-  assert.match(missing.text, /could not read the plan file/)
+  assert.equal(taskHarness.prompted.length, 1)
+  const prompt = taskHarness.prompted[0]
+  assert.equal(prompt.sessionId, sessionId)
+  assert.equal(prompt.mode, 'queue')
+  assert.match(prompt.requestId, /^role-plan-/)
+  const text = prompt.content[0].text
+  assert.ok(text.includes('Implement Y'))
+  assert.match(text, /call the `roles_run` tool exactly once/i)
+  assert.match(text, /Do not implement anything yourself/)
+  assert.ok(taskRun.text.includes(sessionId))
+
+  const claim = handlePlanSessionRequest(taskHarness.ctx, planRouteRequest(sessionId))
+  assert.equal(claim.status, 200)
+  assert.deepEqual(await claim.json(), { ok: true, sessionId })
+  const replay = handlePlanSessionRequest(taskHarness.ctx, planRouteRequest(sessionId))
+  assert.equal(replay.status, 404, 'a claimed marker never opens the session twice')
 })
 
-test('/role-plan is exported and handles a missing command service', async () => {
-  const harness = makeHarness()
-  const result = await handleRolePlanCommand(harness.ctx, resolveRoleTeamConfig({}), { agent: AGENT, rawInput: 'plain task', signal: SIGNAL })
+test('/role-plan reads a plan file and hands it to the new session', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'role-plan-'))
+  const file = join(dir, 'plan.md')
+  await writeFile(file, '# Plan\n\n1. Edit a.js\n2. Test a.js\n', 'utf8')
+  await writeFile(join(dir, 'empty.md'), '   \n', 'utf8')
+
+  const harness = makeHarness({ cwd: dir })
+  const command = harness.commands.get('role-plan')
+  const run = await command.handler({ agent: AGENT, rawInput: 'plan.md', signal: SIGNAL })
+  assert.equal(run.kind, 'success')
+  assert.equal(harness.created[0].cwd, dir)
+  const text = harness.prompted[0].content[0].text
+  assert.ok(text.includes('1. Edit a.js'))
+  assert.ok(text.includes('Execute the plan in plan.md exactly.'))
+  assert.match(text, /<<<PLAN/)
+
+  const empty = await command.handler({ agent: AGENT, rawInput: 'empty.md', signal: SIGNAL })
+  assert.equal(empty.kind, 'error')
+  assert.match(empty.text, /is empty/)
+
+  const missing = await command.handler({ agent: AGENT, rawInput: 'no-such.md', signal: SIGNAL })
+  assert.equal(missing.kind, 'error')
+  assert.match(missing.text, /could not read the plan file/)
+  assert.equal(harness.created.length, 1, 'a rejected input starts nothing')
+})
+
+test('/role-plan reports a Host without a session controller or a failed start', async () => {
+  const bare = makeHarness({ sessionController: false })
+  const result = await handleRolePlanCommand(bare.ctx, resolveRoleTeamConfig({}), { agent: AGENT, rawInput: 'plain task', signal: SIGNAL })
   assert.equal(result.kind, 'error')
-  assert.match(result.text, /Role team: NOT APPROVED/)
+  assert.match(result.text, /no session controller/)
+  assert.equal(bare.calls.length, 0)
+
+  const failing = makeHarness({ createError: new Error('claim exploded') })
+  const failed = await handleRolePlanCommand(failing.ctx, resolveRoleTeamConfig({}), { agent: AGENT, rawInput: 'task', signal: SIGNAL })
+  assert.equal(failed.kind, 'error')
+  assert.match(failed.text, /could not create the role-team session: claim exploded/)
+  assert.equal(handlePlanSessionRequest(failing.ctx, planRouteRequest(failing.created[0].sessionId)).status, 404, 'a failed creation leaves no marker')
+
+  const unprompted = makeHarness({ promptError: new Error('no admission') })
+  const stuck = await handleRolePlanCommand(unprompted.ctx, resolveRoleTeamConfig({}), { agent: AGENT, rawInput: 'task', signal: SIGNAL })
+  assert.equal(stuck.kind, 'error')
+  assert.match(stuck.text, /was created, but the run could not be started: no admission/)
+
+  const renameFails = makeHarness({ renameError: new Error('title taken') })
+  const stillRuns = await handleRolePlanCommand(renameFails.ctx, resolveRoleTeamConfig({}), { agent: AGENT, rawInput: 'task', signal: SIGNAL })
+  assert.equal(stillRuns.kind, 'success', 'a title failure never blocks the run')
+  assert.equal(renameFails.prompted.length, 1)
+})
+
+test('the plan session route is loopback-guarded and one-shot', () => {
+  const harness = makeHarness()
+  const unknown = handlePlanSessionRequest(harness.ctx, planRouteRequest('session-unknown'))
+  assert.equal(unknown.status, 404)
+  const crossSite = handlePlanSessionRequest(harness.ctx, planRouteRequest('session-unknown', {
+    host: '127.0.0.1:62592',
+    'sec-fetch-site': 'cross-site',
+  }))
+  assert.equal(crossSite.status, 403)
+  const nested = handlePlanSessionRequest(harness.ctx, new Request('http://127.0.0.1:62592/plugin-api/role-team/plan-session/a/b', {
+    headers: { host: '127.0.0.1:62592' },
+  }))
+  assert.equal(nested.status, 404)
 })
 
 test('the tools carry structured presentation metadata', async () => {

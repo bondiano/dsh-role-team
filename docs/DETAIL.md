@@ -26,7 +26,13 @@ for each role, lists available models, checks that the routes resolve, and
 warns when the auditor and gate are not independent from the worker.
 `/role-plan <task or plan.md>` starts the whole pipeline on demand — with a
 task PLAN writes the plan, with a Markdown plan file (for example a Jev plan
-artifact) the plan is read from the file and PLAN is skipped.
+artifact) the plan is read from the file and PLAN is skipped. It runs in a
+dedicated session rather than the one that typed the command: the command
+creates the session in the same working directory, hands it one prompt that
+calls `roles_run` with the exact task and plan, and returns immediately. The
+workspace opens the new session automatically (the Host marks the session id
+and the client half claims that marker once), so the pipeline and its live card
+live there while the current session stays free.
 
 In the chat timeline, every role tool call renders as a dedicated card: role
 badges with each stage's provider/model route, a status pill, live progress of
@@ -83,11 +89,13 @@ Or run the whole pipeline on a task, or on a finished plan file:
 /role-plan .dsh/jev/my-approved-plan.md
 ```
 
-The call blocks until the reviewer approves, the rounds run out (and the user
-answers the exhaustion question), or the hard cap of 12 worker attempts is
-reached. The report leads with the ADVISOR and REVIEWER comments, then carries
-the plan, every worker attempt, every verdict, the user's decisions and any
-outstanding feedback for another round.
+The command returns at once with the id of the session it opened; the run itself
+happens in that session, and the roles card there reports it. The run there ends
+when the reviewer approves, the rounds run out (and the user answers the
+exhaustion question), or the hard cap of 12 worker attempts is reached. The
+report leads with the ADVISOR and REVIEWER comments, then carries the plan,
+every worker attempt, every verdict, the user's decisions and any outstanding
+feedback for another round.
 
 ## Limits
 

@@ -33,16 +33,23 @@ test('the client half registers the settings section and the five role tool card
     if (name === 'react') return fakeReact
     throw new Error(`unexpected external: ${name}`)
   })
-  assert.deepEqual(moduleFace.inject, ['slots', 'locale', 'remote', 'remote.session'])
+  assert.deepEqual(moduleFace.inject, ['slots', 'locale', 'remote', 'remote.session', 'uiWorkspace'])
   assert.equal(typeof moduleFace.apply, 'function')
 
   const dictionaries = {}
   const slotInjections = []
   const registrations = []
+  const openedSessions = []
+  let sessionAddedListener
   const ctx = {
     effect(callback) {
       const disposer = callback()
       return typeof disposer === 'function' ? disposer : () => {}
+    },
+    uiWorkspace: {
+      openSession(sessionId) {
+        openedSessions.push(sessionId)
+      },
     },
     locale: {
       register(namespace, values) {
@@ -70,10 +77,36 @@ test('the client half registers the settings section and the five role tool card
     },
     remote: {
       session: { modelCatalog: async () => ({ ok: true, value: { groups: [] } }) },
-      $on: () => () => {},
+      $on(event, listener) {
+        if (event === 'api-session/added') sessionAddedListener = listener
+        return () => {}
+      },
     },
   }
   moduleFace.apply(ctx)
+
+  // A session `/role-plan` created is claimed through the marker route and opened;
+  // an unrelated session is left where it is.
+  const requests = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), init })
+    const planSession = String(url).includes('session-new')
+    return { ok: planSession, async json() { return { ok: true, sessionId: 'session-new' } } }
+  }
+  try {
+    assert.equal(typeof sessionAddedListener, 'function')
+    sessionAddedListener({ sessionId: 'session-new' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    sessionAddedListener({ sessionId: 'session-foreign' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.equal(requests.length, 2)
+  assert.ok(requests[0].url.endsWith('/plugin-api/role-team/plan-session/session-new'))
+  assert.equal(requests[0].init.credentials, 'same-origin')
+  assert.deepEqual(openedSessions, ['session-new'])
 
   assert.deepEqual(slotInjections, ['settings.models.footer', 'tool.call.toolview'])
 

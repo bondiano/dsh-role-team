@@ -18,6 +18,10 @@
  * @module @local/dsh-role-team
  */
 
+import { authenticatedWebServer } from './web-route-auth.mjs'
+
+import { runRuntimeRole, validateRuntimeRoute } from './runtime-role.js'
+import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 
@@ -68,13 +72,17 @@ const LIMITS = Object.freeze({
   maxWorkerAttempts: 12,
   /** A plan file larger than this is refused instead of read. */
   planFileMaxChars: 200_000,
+  /** Characters of the task used in the title of a `/role-plan` session. */
+  planSessionTitleChars: 60,
+  /** How long the browser may claim a freshly created `/role-plan` session for auto-opening. */
+  planSessionTtlMs: 10 * 60 * 1000,
 })
 
 /** Same-origin settings route served to the browser half. */
 const ROLES_SETTINGS_ROUTE = '/plugin-api/role-team/roles'
 
 /** The section that tells the lead what the team is for. */
-const ROLE_GUIDANCE = `Role team (PLAN -> WORKER -> ADVISOR -> REVIEWER) is available. \`roles_run\` runs the full loop on a self-contained task: PLAN drafts a rigorous plan, the ADVISOR audits that plan before WORKER starts (a rejected plan is revised from the advisor's issues), WORKER implements in this shared workspace, ADVISOR audits every attempt, and REVIEWER is the final gate whose approval is the only approved outcome; when the rounds run out without approval the run asks the user how to proceed. Use it for substantial implementation, migration or verification work. Pass the user's task verbatim and every fact the roles need: they start without this conversation. The \`role_*\` tools run a single role once when that is enough. The user can also start the whole pipeline with the \`/role-plan\` chat command, which takes a task or a plan file (for example a Jev plan artifact) that the team then executes. Role models are configured separately and may use different providers; inspect or change them with \`/roles\`. Do not start the REVIEWER before the worker has reported completion.`
+const ROLE_GUIDANCE = `Role team (PLAN -> WORKER -> ADVISOR -> REVIEWER) is available. \`roles_run\` runs the full loop on a self-contained task: PLAN drafts a rigorous plan, the ADVISOR audits that plan before WORKER starts (a rejected plan is revised from the advisor's issues), WORKER implements in this shared workspace, ADVISOR audits every attempt, and REVIEWER is the final gate whose approval is the only approved outcome; when the rounds run out without approval the run asks the user how to proceed. Use it for substantial implementation, migration or verification work. Pass the user's task verbatim and every fact the roles need: they start without this conversation. The \`role_*\` tools run a single role once when that is enough. The user can also start the whole pipeline with the \`/role-plan\` chat command, which opens a separate session for the run and takes a task or a plan file (for example a Jev plan artifact) that the team then executes there. Role models are configured separately and may use different providers; inspect or change them with \`/roles\`. Do not start the REVIEWER before the worker has reported completion.`
 
 /* ------------------------------------------------------------------------- *
  * Small utilities
@@ -218,7 +226,9 @@ export function normalizeRoute(value) {
   }
   if (isPlainObject(value)) {
     if (value.inherit === true) return { route: null }
-    const provider = typeof value.provider === 'string' ? value.provider.trim() : ''
+    const runtime = value.runtime
+    if (runtime !== undefined && !['native', 'cursor', 'droid'].includes(runtime)) return { error: 'runtime must be native, cursor, or droid' }
+    const provider = typeof value.provider === 'string' ? value.provider.trim() : (runtime && runtime !== 'native' ? runtime : '')
     const model = typeof value.model === 'string' ? value.model.trim() : ''
     if (provider === '' || model === '') {
       return { error: 'a route object needs non-empty provider and model strings' }
@@ -231,6 +241,7 @@ export function normalizeRoute(value) {
       route: {
         provider,
         model,
+        ...(runtime === undefined ? {} : { runtime }),
         ...(typeof effort === 'string' ? { reasoningEffort: effort.trim() } : {}),
       },
     }
@@ -245,7 +256,7 @@ export function normalizeRoute(value) {
  */
 export function formatRoute(route) {
   if (route === null) return 'inherit session model'
-  return `${route.provider}/${route.model}${route.reasoningEffort === undefined ? '' : ` @${route.reasoningEffort}`}`
+  return `${route.runtime && route.runtime !== 'native' ? `${route.runtime}:` : ''}${route.provider}/${route.model}${route.reasoningEffort === undefined ? '' : ` @${route.reasoningEffort}`}`
 }
 
 /**
@@ -332,6 +343,7 @@ export function resolveRoleTeamConfig(raw) {
  * @returns {Promise<void>} fulfillment when the adapter accepts the route
  */
 async function validateRoute(ctx, role, route, signal) {
+  if (route.runtime && route.runtime !== 'native') return validateRuntimeRoute(ctx, route)
   const llm = ctx.get('llm')
   if (llm === undefined || llm === null) {
     throw new Error('the LLM service is unavailable, so role routes cannot be validated')
@@ -731,6 +743,10 @@ function roleChildName(role) {
  * }>} role result
  */
 async function runRole(ctx, config, { role, prompt, parent, signal, cwd }) {
+  const selectedRoute = config.roles[role]
+  if (selectedRoute?.runtime && selectedRoute.runtime !== 'native') {
+    return runRuntimeRole(ctx, { route: selectedRoute, role, prompt, parent, signal, cwd })
+  }
   const subagents = ctx.get('subagents')
   if (subagents === undefined || subagents === null) {
     throw new Error('role team needs the subagent service; mount @deepseek-ai/dsh-subagent and @deepseek-ai/dsh-subagent-spawn-in-process')
@@ -759,6 +775,7 @@ async function runRole(ctx, config, { role, prompt, parent, signal, cwd }) {
       parent,
       signal,
       delivery: 'caller',
+      ...(cwd === undefined ? {} : { cwd }),
       prompt: [{ type: 'text', text: prompt }],
       ...(agentOptions === undefined ? {} : { agentOptions }),
       ...(provider.capabilities !== undefined && provider.capabilities.depthLimit && Number.isInteger(config.childMaxDepth)
@@ -839,6 +856,7 @@ function buildTeamReport({ status, config, plan, rounds, comments, decisions, st
   lines.push(`Role team: ${headline} after ${rounds.length} round(s) in ${formatDuration(Date.now() - startedAt)}.`)
   lines.push(`Roles: ${ROLE_NAMES.map(role => `${role}=${formatRoute(config.roles[role])}`).join(' · ')}`)
   lines.push(`Task: ${oneLine(task, 300)}`)
+  if (rounds.some(round => round.worker.cwd)) lines.push('Source workspace is unchanged. Apply worker patches in round order: later patches are relative to the preceding candidate, or integrate the final candidate workspace manually.')
   if (comments.length > 0) {
     lines.push('')
     lines.push('ADVISOR AND REVIEWER COMMENTS')
@@ -856,6 +874,8 @@ function buildTeamReport({ status, config, plan, rounds, comments, decisions, st
     lines.push('')
     lines.push(`ROUND ${round.number}`)
     lines.push(`WORKER (${formatRoute(round.worker.route)}, ${round.worker.status}, ${formatDuration(round.worker.durationMs)})`)
+    if (round.worker.cwd) lines.push(`Candidate workspace: ${round.worker.cwd}`)
+    for (const artifact of round.worker.artifacts ?? []) lines.push(`Result artifact: ${artifact}`)
     lines.push(clip(round.worker.text === '' ? '(no report)' : round.worker.text, LIMITS.workerChars))
     if (round.worker.diagnostic !== undefined) lines.push(`Diagnostic: ${clip(round.worker.diagnostic, 1500)}`)
     lines.push(`ADVISOR (${formatRoute(round.advisor.route)}, ${round.advisor.status}, ${formatDuration(round.advisor.durationMs)}) — ${round.advisorVerdict.approved ? 'APPROVED' : 'CHANGES REQUIRED'}`)
@@ -1112,7 +1132,7 @@ export async function runRoleTeam(ctx, { agent, task, context, plan, signal, con
   if (agent === undefined || agent === null) throw new Error('role team needs a calling agent')
   const taskText = typeof task === 'string' ? task.trim() : ''
   if (taskText === '') throw new Error('role team needs a non-empty task')
-  const cwd = ctx.get('workingDirectory')?.get?.(agent.session)
+  let cwd = ctx.get('workingDirectory')?.get?.(agent.session)
   const usedRoles = plan === undefined || plan.trim() === ''
     ? ROLE_NAMES
     : ['worker', 'advisor', 'reviewer']
@@ -1245,6 +1265,7 @@ export async function runRoleTeam(ctx, { agent, task, context, plan, signal, con
         extra: runConfig.prompts.worker,
       })
       const worker = await stage('worker', workerPrompt)
+      if (worker.cwd !== undefined) cwd = worker.cwd
       previousReport = worker.text
       const advisorPrompt = buildAdvisorPrompt({
         task: taskText,
@@ -1491,7 +1512,8 @@ function buildTools(ctx, config) {
         decisions: outcome.decisions,
         rounds: outcome.rounds.map(round => ({
           number: round.number,
-          worker: { role: 'worker', route: round.worker.route, status: round.worker.status, durationMs: round.worker.durationMs },
+          worker: { role: 'worker', route: round.worker.route, status: round.worker.status, durationMs: round.worker.durationMs,
+            ...(round.worker.cwd ? { cwd: round.worker.cwd, artifacts: round.worker.artifacts ?? [], runtimeSessionId: round.worker.runtimeSessionId } : {}) },
           advisor: { role: 'advisor', route: round.advisor.route, status: round.advisor.status, durationMs: round.advisor.durationMs },
           ...(round.reviewer === undefined ? {} : { reviewer: { role: 'reviewer', route: round.reviewer.route, status: round.reviewer.status, durationMs: round.reviewer.durationMs } }),
         })),
@@ -1681,7 +1703,7 @@ async function saveRoleRoute(ctx, role, route) {
     const next = isPlainObject(current) ? cloneJson(current) : {}
     const roles = isPlainObject(next.roles) ? next.roles : {}
     if (route === null) Reflect.deleteProperty(roles, role)
-    else roles[role] = { provider: route.provider, model: route.model, ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }) }
+    else roles[role] = { provider: route.provider, model: route.model, ...(route.runtime === undefined ? {} : { runtime: route.runtime }), ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }) }
     if (Object.keys(roles).length === 0) Reflect.deleteProperty(next, 'roles')
     else next.roles = roles
     nextConfig = next
@@ -2120,8 +2142,13 @@ function registerRolesCommand(ctx, config) {
  *
  * A `.md` argument is read as the plan (absolute, or relative to the session
  * workspace, e.g. a Jev plan artifact) and PLAN is skipped; anything else is
- * the task text and PLAN writes the plan. Both forms drive the complete
- * pipeline through `runRoleTeam`.
+ * the task text and PLAN writes the plan.
+ *
+ * The run never happens in the session that typed the command. The command
+ * creates a dedicated session in the same working directory, hands it one
+ * deterministic prompt that calls `roles_run` with the exact task and plan, and
+ * returns at once; the browser half opens that session, so the pipeline and its
+ * live roles card live there while the current session stays free.
  *
  * @param {object} ctx Host context
  * @param {object} config resolved configuration
@@ -2158,17 +2185,67 @@ export async function handleRolePlanCommand(ctx, config, invocation) {
     plan = clip(content, LIMITS.planChars)
     task = `Execute the plan in ${raw} exactly.`
   }
+  const controller = ctx.get('sessionController')
+  if (controller === undefined || controller === null
+    || typeof controller.create !== 'function' || typeof controller.prompt !== 'function') {
+    return {
+      kind: 'error',
+      text: 'this Host mounts no session controller, so /role-plan cannot open a separate session; call roles_run in a normal session instead.',
+    }
+  }
+  const parentSession = invocation.agent?.session
+  let cwd = ''
   try {
-    const outcome = await runRoleTeam(ctx, {
-      agent: invocation.agent,
-      task,
-      ...(plan === undefined ? {} : { plan }),
-      signal: invocation.signal,
-      config,
-    })
-    return { kind: outcome.status === 'approved' || outcome.status === 'continued' ? 'success' : 'error', text: outcome.report }
+    cwd = ctx.get('workingDirectory')?.get?.(parentSession) ?? ''
+  } catch {
+    cwd = ''
+  }
+  const sessionId = `session-${randomUUID()}`
+  rememberPlanSession(sessionId)
+  try {
+    await controller.create({ sessionId, ...(typeof cwd === 'string' && cwd !== '' ? { cwd } : {}) })
   } catch (error) {
-    return { kind: 'error', text: messageOf(error) }
+    planSessions.delete(sessionId)
+    return { kind: 'error', text: `could not create the role-team session: ${messageOf(error)}` }
+  }
+  if (typeof cwd === 'string' && cwd !== '') {
+    try {
+      const registry = ctx.get('workspaceRegistry')
+      const workspace = typeof registry?.resolveByPath === 'function'
+        ? await registry.resolveByPath(cwd)
+        : undefined
+      await workspace?.attachSession?.(sessionId)
+    } catch (error) {
+      ctx.logger?.warn?.(`role-team: session ${sessionId} was created but not attached to "${cwd}": ${messageOf(error)}`)
+    }
+  }
+  try {
+    await controller.rename({ sessionId, title: planSessionTitle(task) })
+  } catch (error) {
+    ctx.logger?.warn?.(`role-team: session ${sessionId} keeps its default title: ${messageOf(error)}`)
+  }
+  try {
+    await controller.prompt({
+      requestId: `role-plan-${randomUUID()}`,
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: planSessionPrompt(task, plan) }],
+    }, invocation.signal ?? new AbortController().signal)
+  } catch (error) {
+    return {
+      kind: 'error',
+      text: `the role-team session ${sessionId} was created, but the run could not be started: ${messageOf(error)}`,
+    }
+  }
+  return {
+    kind: 'success',
+    text: [
+      'Role team run started in a new session.',
+      `Session: ${sessionId}`,
+      `Task: ${oneLine(task, 240)}`,
+      ...(plan === undefined ? [] : [`Plan: passed verbatim to the role team (${plan.length} characters).`]),
+      'That session runs roles_run and shows the live roles card; the workspace opens it automatically.',
+    ].join('\n'),
   }
 }
 
@@ -2183,7 +2260,7 @@ function registerRolePlanCommand(ctx, config) {
   if (commands === undefined || commands === null || typeof commands.register !== 'function') return
   ctx.effect(() => commands.register({
     name: 'role-plan',
-    description: 'Run the full role team on a task or a plan file: the ADVISOR audits the plan, WORKER implements it, ADVISOR checks every attempt, and REVIEWER gives the final verdict.',
+    description: 'Run the full role team on a task or a plan file in a new session: the ADVISOR audits the plan, WORKER implements it, ADVISOR checks every attempt, and REVIEWER gives the final verdict.',
     input: { hint: '<task or plan.md>' },
     handler: invocation => handleRolePlanCommand(ctx, config, invocation),
   }))
@@ -2224,6 +2301,91 @@ export function handleRunStateRequest(ctx, request) {
 }
 
 /* ------------------------------------------------------------------------- *
+ * Plan sessions
+ * ------------------------------------------------------------------------- */
+
+/** Same-origin prefix route the browser polls for a freshly created plan session. */
+const PLAN_SESSION_ROUTE = '/plugin-api/role-team/plan-session'
+
+/**
+ * Sessions `/role-plan` created and the browser has not opened yet.
+ * Registering the identity before the session exists closes the race with the
+ * `api-session/added` event the new session publishes.
+ */
+const planSessions = new Map()
+
+/**
+ * Remember one plan session for auto-opening, dropping expired entries.
+ * @param {string} sessionId created session identity
+ * @returns {void}
+ */
+function rememberPlanSession(sessionId) {
+  const now = Date.now()
+  for (const [id, createdAt] of planSessions) {
+    if (now - createdAt > LIMITS.planSessionTtlMs) planSessions.delete(id)
+  }
+  planSessions.set(sessionId, now)
+}
+
+/**
+ * One-line title for a plan session, from its task.
+ * @param {string} task task text
+ * @returns {string} session title
+ */
+function planSessionTitle(task) {
+  const text = String(task).replace(/\s+/g, ' ').trim()
+  const max = LIMITS.planSessionTitleChars
+  return `Role plan: ${text.length <= max ? text : `${text.slice(0, max - 1)}…`}`
+}
+
+/**
+ * Build the single deterministic prompt a plan session receives: run the team
+ * with the exact task and plan, and do nothing else in that session.
+ * @param {string} task task text
+ * @param {string | undefined} plan plan text
+ * @returns {string} prompt text
+ */
+function planSessionPrompt(task, plan) {
+  return [
+    'The /role-plan command opened this session to run the role team. Your only job here is to start that run.',
+    '',
+    `Task (pass this text verbatim as the task argument):\n<<<TASK\n${task}\nTASK>>>`,
+    ...(plan === undefined
+      ? []
+      : ['', `Plan (pass this text verbatim as the plan argument):\n<<<PLAN\n${plan}\nPLAN>>>`]),
+    '',
+    'Call the `roles_run` tool exactly once with the task and, when present, the plan copied verbatim. Do not implement anything yourself, do not read or edit files, do not ask questions, and do not call other tools. When roles_run returns, answer with one short line naming the outcome.',
+  ].join('\n')
+}
+
+/**
+ * Serve the browser's claim of one freshly created plan session.
+ *
+ * GET-only (the webserver answers anything else itself), loopback-guarded, and
+ * one-shot: the first reader takes the marker, so a replayed request stops
+ * opening the session again. Unknown ids answer 404.
+ *
+ * @param {object} ctx Host context
+ * @param {Request} request incoming Fetch request
+ * @returns {Response} JSON response
+ */
+export function handlePlanSessionRequest(ctx, request) {
+  if (!trustedRoleRouteRequest(request)) return roleRouteJson({ ok: false, error: 'forbidden' }, 403)
+  let sessionId = ''
+  try {
+    const url = new URL(request.url)
+    const rest = url.pathname.slice(PLAN_SESSION_ROUTE.length)
+    sessionId = rest === '' ? '' : decodeURIComponent(rest.replace(/^\//, ''))
+  } catch {
+    return roleRouteJson({ ok: false, error: 'bad request' }, 400)
+  }
+  if (sessionId === '' || sessionId.includes('/')) return roleRouteJson({ ok: false, error: 'unknown session' }, 404)
+  if (!planSessions.has(sessionId)) return roleRouteJson({ ok: false, error: 'unknown session' }, 404)
+  planSessions.delete(sessionId)
+  return roleRouteJson({ ok: true, sessionId })
+}
+
+/* ------------------------------------------------------------------------- *
  * Plugin entry
  * ------------------------------------------------------------------------- */
 
@@ -2242,16 +2404,22 @@ export function apply(ctx, rawConfig = {}) {
   registerRolesCommand(ctx, config)
   registerRolePlanCommand(ctx, config)
   ctx.inject(['webServer'], routeCtx => {
-    routeCtx.effect(() => routeCtx.webServer.register({
+    const webServer = authenticatedWebServer(routeCtx, routeCtx.webServer)
+    routeCtx.effect(() => webServer.register({
       kind: 'exact',
       path: ROLES_SETTINGS_ROUTE,
       handler: (req, res) => handleRolesHttp(ctx, req, res, rawConfig),
     }), 'role-team: settings route')
-    routeCtx.effect(() => routeCtx.webServer.register({
+    routeCtx.effect(() => webServer.register({
       kind: 'prefix',
       path: RUN_STATE_ROUTE,
       resource: request => handleRunStateRequest(ctx, request),
     }), 'role-team: run state route')
+    routeCtx.effect(() => webServer.register({
+      kind: 'prefix',
+      path: PLAN_SESSION_ROUTE,
+      resource: request => handlePlanSessionRequest(ctx, request),
+    }), 'role-team: plan session route')
   })
   const order = typeof ctx.systemPrompt?.getSectionOrder === 'function'
     ? ctx.systemPrompt.getSectionOrder('TOOL_SUBAGENT') + 10

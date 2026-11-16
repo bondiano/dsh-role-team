@@ -40,8 +40,11 @@ Two human commands:
   instead of the lead agent's ordinary execution. With a task, PLAN writes the
   plan; with a path to a Markdown plan file (for example a Jev plan artifact,
   resolved against the session workspace), the plan is read from the file and
-  PLAN is skipped. The command drives the complete pipeline and returns the
-  team's report.
+  PLAN is skipped. The command does not run the pipeline in the session that
+  typed it: it creates a dedicated session in the same working directory, hands
+  it one prompt that calls `roles_run` with the exact task and plan, and returns
+  at once. The workspace opens that session automatically, so the live roles
+  card and the whole run stay there while the current session stays free.
 
 ## Default routes
 
@@ -241,7 +244,8 @@ node --test test/*.test.js
 The suite uses a fake Host context and canned role outputs: it checks config
 parsing, route validation failures, the plan-audit order and revision, the
 strict pipeline order, feedback propagation, the reviewer gate, the four
-exhaustion choices and their hard cap, `/role-plan` (task and plan-file forms),
-`/roles set`/`reset` persistence, family warnings, the structured presentation
-metadata, the live run-state route, the Settings snapshot, and the settings
-route's GET/POST/reset and admission checks.
+exhaustion choices and their hard cap, `/role-plan` (task and plan-file forms,
+the dedicated session it creates, its one-shot claim route and the failure
+paths), `/roles set`/`reset` persistence, family warnings, the structured
+presentation metadata, the live run-state route, the Settings snapshot, and the
+settings route's GET/POST/reset and admission checks.
