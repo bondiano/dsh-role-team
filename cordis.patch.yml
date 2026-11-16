@@ -9,7 +9,7 @@
 # model.
 - insert:
     - id: role-team
-      name: '@local/dsh-role-team'
+      name: "@local/dsh-role-team"
       config:
         # Role routes live in the plugin's code as recommended defaults; a role
         # is written here only when /roles set or the Settings page overrides it.

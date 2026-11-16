@@ -1,5 +1,7 @@
 # Role team
 
+[English README](../README.md) · [Русский README](../README.ru.md)
+
 Four roles with independent models, driven as one team:
 
 - **PLAN** — a strong planner. Produces the ordered plan with exact file paths,
@@ -15,7 +17,9 @@ Four roles with independent models, driven as one team:
   completion and the advisor approves; its approval is the run's only APPROVED
   verdict.
 
-`roles_run` drives the loop: plan, plan audit, implement, audit every attempt,
+`roles_start` drives the loop in the background while the orchestrator remains
+available for chat; `roles_run` waits for the same loop in the foreground:
+plan, plan audit, implement, audit every attempt,
 feed issues back to the worker, and finish with the reviewer. When the rounds
 run out without approval, the run asks the user how to proceed: continue
 without approval, try three more rounds, change the WORKER model (with a model
@@ -29,10 +33,20 @@ task PLAN writes the plan, with a Markdown plan file (for example a Jev plan
 artifact) the plan is read from the file and PLAN is skipped. It runs in a
 dedicated session rather than the one that typed the command: the command
 creates the session in the same working directory, hands it one prompt that
-calls `roles_run` with the exact task and plan, and returns immediately. The
+calls `roles_start` with the exact task and plan, and returns immediately. The
 workspace opens the new session automatically (the Host marks the session id
 and the client half claims that marker once), so the pipeline and its live card
-live there while the current session stays free.
+live there while both sessions remain available for conversation. Ask
+“what's happening?” or “чё там, как там?” in the run's session: its orchestrator
+uses `roles_status` to inspect the active child and completed stages.
+
+`roles_status` accepts optional `run_id` (the latest run in the current session
+by default) and `question` (up to 2,000 characters) to send a progress question
+to an active native child's inbox. Acceptance is reported as `questionSent`;
+read status again to observe subsequent activity. External children expose
+progress but do not accept these questions. `roles_cancel` and
+`/roles cancel [run-id]` abort the current session's background run and release
+the active child. `/roles status [run-id]` also reads progress directly.
 
 In the chat timeline, every role tool call renders as a dedicated card: role
 badges with each stage's provider/model route, a status pill, live progress of
@@ -58,7 +72,7 @@ a provider's models. `/roles reset <role>` returns to the recommended default;
 a role configured as `null` in `cordis.patch.yml` follows the session model.
 
 The recommended setup keeps the worker, advisor and reviewer in different
-families (DeepSeek, GLM, OpenAI). `/roles doctor` reports the resolved routes
+families (DeepSeek, GLM, Qwen). `/roles doctor` reports the resolved routes
 and warns about shared families.
 
 ## Settings
@@ -89,8 +103,9 @@ Or run the whole pipeline on a task, or on a finished plan file:
 /role-plan .dsh/jev/my-approved-plan.md
 ```
 
-The command returns at once with the id of the session it opened; the run itself
-happens in that session, and the roles card there reports it. The run there ends
+`/roles run` starts in the current session; `/role-plan` returns at once with
+the id of the session it opened. The run itself happens in the background,
+and the roles card reports it. The run ends
 when the reviewer approves, the rounds run out (and the user answers the
 exhaustion question), or the hard cap of 12 worker attempts is reached. The
 report leads with the ADVISOR and REVIEWER comments, then carries the plan,
@@ -105,3 +120,19 @@ permission policy; the advisor and reviewer prompts forbid edits, but the
 permission layer is what actually enforces file access. A full run can take
 several minutes and spends tokens in every role and round; `maxRounds` bounds
 it.
+
+One background run may be active per session. Up to 100 recent run records are
+held in memory per plugin instance; reloading the plugin aborts active runs and
+clears these records. There is no restart/resume support or automatic
+completion message; use status to retrieve the final report. Run inspection
+and cancellation are scoped to the calling session.
+
+## Source builds
+
+The host and browser client are authored in TypeScript. Run `npm ci` from the
+package root to install the pinned development tools and build `dist/` through
+`prepare`. After source changes, run `npm run check`; this verifies Oxfmt,
+type-aware Oxlint, strict TypeScript and the tests against emitted JavaScript.
+Install or link the built directory, or use `npm pack` to create a bundle.
+The package exports `dist/index.js` and `dist/client.js`; the browser entry
+remains a classic ModuleLoader script. The package is licensed under MIT.

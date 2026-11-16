@@ -1,15 +1,48 @@
 # Role team
 
+[English](README.md) · [Русский](README.ru.md)
+
 A four-role working model for DeepSeek Harness, ported from omp (oh-my-pi):
 **PLAN** designs, **WORKER** implements, **ADVISOR** audits every attempt from
 another model family, and **REVIEWER** is the final independent gate. Each role
 runs as a real DSH subagent with its own model and provider, and the bundled
-`roles_run` tool drives the whole loop until the reviewer approves or the round
+`roles_start` and `roles_run` tools drive the loop until the reviewer approves or the round
 limit is reached.
+
+## Interface
+
+The images show the shipped components with deterministic demonstration data,
+using the DSH theme. No live provider or user session is involved. See the
+[capture instructions](docs/preview/README.md) to reproduce them.
+
+**Settings → Models:** choose a separate model for each role.
+
+![Role model settings](docs/screenshots/settings.en.png)
+
+**Model picker:** runtime, provider, model search and reasoning effort.
+
+![Model picker](docs/screenshots/model-picker.en.png)
+
+**Background pipeline:** the settled `roles_start` card keeps updating; the
+currently active role is highlighted.
+
+![Running role-team pipeline](docs/screenshots/live.en.png)
+
+**Final report:** the same background card updates to show independent ADVISOR
+and REVIEWER verdicts and comments.
+
+![Role-team verdict and comments](docs/screenshots/result.en.png)
 
 ## What it adds
 
-Five model-facing tools:
+Model-facing tools:
+
+- `roles_start` — start the full team in the background and return immediately,
+  leaving the orchestrator available for conversation.
+- `roles_status` — inspect the run and the active role's latest progress. Use
+  this when the user asks “what's happening?” or “чё там, как там?”.
+- `roles_cancel` — cancel the current session's background run and release its
+  active child.
 
 - `roles_run` — the full team loop on one self-contained task. PLAN drafts a
   rigorous plan, the ADVISOR audits that plan before WORKER starts (a rejected
@@ -24,7 +57,7 @@ Five model-facing tools:
   once and return its report. Useful when the lead wants one plan, one audit or
   one final review without the whole loop.
 
-Two human commands:
+Chat commands:
 
 - `/roles` — show the routes and their sources.
 - `/roles set <role> <provider>/<model>[:effort]` — validate the route against
@@ -35,28 +68,70 @@ Two human commands:
   models, so the route ids are discoverable.
 - `/roles doctor` — validate every route and warn when the worker, advisor and
   reviewer are not from independent model families.
-- `/roles run <task>` — run the full team directly from the command surface.
+- `/roles run <task>` — start the full team in the background.
+- `/roles status [run-id]` — inspect a background run in this session.
+- `/roles cancel [run-id]` — cancel a background run in this session.
 - `/role-plan <task or plan.md>` — start the full role-team process on demand,
   instead of the lead agent's ordinary execution. With a task, PLAN writes the
   plan; with a path to a Markdown plan file (for example a Jev plan artifact,
   resolved against the session workspace), the plan is read from the file and
   PLAN is skipped. The command does not run the pipeline in the session that
   typed it: it creates a dedicated session in the same working directory, hands
-  it one prompt that calls `roles_run` with the exact task and plan, and returns
+  it one prompt that calls `roles_start` with the exact task and plan, and returns
   at once. The workspace opens that session automatically, so the live roles
-  card and the whole run stay there while the current session stays free.
+  card and the whole run stay there. Both sessions remain available for chat;
+  ask for progress in the session that owns the run.
+
+## Keep the orchestrator available
+
+Use `/roles run <task>` in the current session, or `/role-plan <task or plan.md>`
+to open a dedicated session. The orchestrator calls `roles_start` and returns
+without waiting for the pipeline. You can then write **“чё там, как там?”** or
+**“what's the progress?”** in that session. Its guidance tells it to call
+`roles_status` before answering.
+
+`roles_start` accepts the same `task`, optional `context`, `plan` and
+`max_rounds` arguments as `roles_run`. It returns a `runId`. Only one background
+run may be active in a session.
+
+`roles_status` accepts an optional `run_id`; omitted, it selects the latest run
+in the current session. It reports the active role and route, completed stages,
+observed child activity, and the final report when finished. For example:
+
+```json
+{
+	"run_id": "<runId>",
+	"question": "What is done, what remains, and are you blocked?"
+}
+```
+
+The optional `question` (up to 2,000 characters) is sent to the active native
+child's inbox. `questionSent: true` confirms acceptance by the inbox; it does
+not mean the child has already answered. Read status again for subsequent
+observed activity. External runtime activity can be inspected, but status
+questions cannot be sent to external children.
+
+Use `roles_cancel` with optional `run_id`, or `/roles cancel [run-id]`, to abort
+the current session's run and release its active child. Run IDs do not grant
+access to another session's runs. Finished runs are retrieved through status;
+there is no automatic completion message to the orchestrator.
+
+Background state is held in memory. When starting a run with 100 or more records,
+the plugin evicts older completed records; active runs are retained. A plugin reload aborts active background runs and clears their
+records; restarting does not resume them. Completed tool results already
+stored in the timeline remain ordinary session history.
 
 ## Default routes
 
 The recommended setup keeps all four roles on the configured OpenCode Go
 route but uses four different model families:
 
-| Role | Default route | Family | Why |
-|---|---|---|---|
-| PLAN | `opencode-go/gpt-6-luna` | OpenAI | strong planning model |
-| WORKER | `opencode-go/deepseek-v4.1-flash` | DeepSeek | fast, cheap implementer |
-| ADVISOR | `opencode-go/glm-5.3` | ZAI | a different family from the worker |
-| REVIEWER | `opencode-go/qwen3.8-max` | Qwen | independent from both worker and advisor |
+| Role     | Default route                     | Family   | Why                                      |
+| -------- | --------------------------------- | -------- | ---------------------------------------- |
+| PLAN     | `opencode-go/gpt-6-luna`          | OpenAI   | strong planning model                    |
+| WORKER   | `opencode-go/deepseek-v4.1-flash` | DeepSeek | fast, cheap implementer                  |
+| ADVISOR  | `opencode-go/glm-5.3`             | ZAI      | a different family from the worker       |
+| REVIEWER | `opencode-go/qwen3.8-max`         | Qwen     | independent from both worker and advisor |
 
 The defaults deliberately use the provider that is configured in this profile,
 while keeping the four families distinct. When another provider is available
@@ -71,18 +146,18 @@ a provider is not configured. The plugin also accepts `roles` in
 
 ```yaml
 - id: role-team
-  name: '@local/dsh-role-team'
+  name: "@local/dsh-role-team"
   config:
     roles:
       plan: { provider: anthropic, model: claude-opus-5, reasoningEffort: high }
       worker: { provider: opencode-go, model: deepseek-v4.1-flash }
       advisor: { provider: zai, model: glm-5.3 }
       reviewer: { provider: openai-codex, model: gpt-6-sol }
-    maxRounds: 3       # worker attempts per run, 1-6
-    maxPlanPasses: 2   # ADVISOR plan-audit passes before WORKER, 1-3
-    childMaxDepth: 2   # delegation depth available to role children
-    prompts:           # optional extra instructions per role
-      worker: 'Prefer the repository conventions over new abstractions.'
+    maxRounds: 3 # worker attempts per run, 1-6
+    maxPlanPasses: 2 # ADVISOR plan-audit passes before WORKER, 1-3
+    childMaxDepth: 2 # delegation depth available to role children
+    prompts: # optional extra instructions per role
+      worker: "Prefer the repository conventions over new abstractions."
 ```
 
 Compact `provider/model[:effort]` strings work too. Routes are validated with
@@ -108,12 +183,32 @@ section below the provider cards:
   a stored route that no routable provider advertises as not currently
   available.
 
+The picker also supports **Cursor** and **Factory Droid** when the matching
+`agentRuntime` is installed in the profile. Enter the runtime's model ID
+directly; the DSH catalogue provides suggestions. External roles execute in an
+isolated copy and report its path and artifacts. Their changes are not applied
+to the source workspace automatically.
+
 Changes save immediately through the same profile configuration editor as
 `/roles set`, so the chat command and the page stay one source of truth. The
 page needs a browser refresh after the bundle is installed or its client half
 changes.
 
 ## Installation
+
+Requires Node.js 22.13 or newer. From a source checkout, install the pinned
+build tools and compile before adding or linking the directory:
+
+```sh
+npm ci
+```
+
+The `prepare` lifecycle builds TypeScript into `dist/`. After editing sources,
+run `npm run build` before reloading the plugin. `npm pack` also builds before
+creating the bundle; the archive includes JavaScript, locales and the license,
+with no runtime npm dependencies. A copied or `link:` directory must include
+its built `dist/`; DSH does not compile this package. The workstation macOS
+installer builds its staged copy automatically; Nix builds it from the npm lockfile.
 
 Install the directory through **Plugins → Add plugin**, or with the plugin
 manager:
@@ -166,7 +261,7 @@ session, so the gate cannot be used as a first reviewer by accident.
 
 ## Role cards in the chat timeline
 
-The browser half registers dedicated cards for the five role tools in the chat
+The browser half registers dedicated cards for the role tools in the chat
 timeline (keyed `tool.call.toolview` rows):
 
 - a role badge with the stage's provider/model route, and a status pill
@@ -204,8 +299,8 @@ whose id does not reveal its family is treated as its provider id.
   lands in the active profile's `cordis.patch.yml` and survives restart.
 - `maxRounds` is clamped to 1-6; `childMaxDepth` to 0-8. `roles_run` accepts a
   per-call `max_rounds` override.
-- The prompt section adds roughly 100 tokens to the lead's system prompt. The
-  five tool schemas are visible to the lead and to role children; role prompts
+- The prompt section explains the team tools to the lead. The
+  tool schemas are visible to the lead and to role children; role prompts
   tell children not to call the role tools, and `childMaxDepth` prevents
   unbounded recursion.
 
@@ -225,21 +320,28 @@ whose id does not reveal its family is treated as its provider id.
   every fact they need in `task` and `context`.
 - `roles_run` is a foreground tool call. It can take several minutes and spends
   tokens for every role in every round; the round limit is the budget guard.
+  Use `roles_start` to keep the orchestrator conversational during the run.
 - The standalone `role_reviewer` tool requires a completed `role_worker` call
   in the same session. It cannot tell whether the worker's claim of completion
   is true; it verifies from scratch, which is the point of the gate.
 - `/roles set` triggers a Loader reload of the plugin row, which is safe while
   idle. Do not change routes in the middle of a run.
-- The plugin imports no DSH packages; it resolves everything from the live Host
-  context. It needs `ctx.tools`, `ctx.systemPrompt` and `ctx.subagents`; the
-  command and route persistence degrade gracefully when their services are
-  absent.
+- The plugin imports no DSH packages; it resolves services from the live Host
+  context. Loading requires `ctx.tools` and `ctx.systemPrompt`; native roles
+  additionally need `ctx.subagents`, while external routes need `agentRuntime`.
+  Commands and route persistence require their corresponding Host services.
 
-## Tests
+## Development
 
 ```sh
-node --test test/*.test.js
+npm ci
+npm run check
 ```
+
+`check` runs Oxfmt, type-aware Oxlint, strict TypeScript and all Node tests
+against the emitted JavaScript. `npm run format` and `npm run lint:fix` apply
+formatting and lint fixes. Tool versions and formatter/linter settings match
+`extensions/omp/cursor`; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The suite uses a fake Host context and canned role outputs: it checks config
 parsing, route validation failures, the plan-audit order and revision, the
@@ -249,3 +351,7 @@ the dedicated session it creates, its one-shot claim route and the failure
 paths), `/roles set`/`reset` persistence, family warnings, the structured
 presentation metadata, the live run-state route, the Settings snapshot, and the
 settings route's GET/POST/reset and admission checks.
+
+## License
+
+[MIT](LICENSE).

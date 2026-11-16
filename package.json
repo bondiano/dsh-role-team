@@ -1,46 +1,70 @@
 {
-  "name": "@local/dsh-role-team",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "Role team for DeepSeek Harness: PLAN, WORKER, ADVISOR and REVIEWER agents with independently configured models and providers, an orchestrated work loop, a Settings → Models role picker, and a /roles command.",
-  "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
-  },
-  "files": [
-    "index.js",
-    "runtime-role.js",
-    "client.js",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "docs",
-    "README.md",
-    "icon.svg",
-    "web-route-auth.mjs"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true,
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-settings-models",
-        "@deepseek-ai/dsh-client-ui-tool"
-      ]
-    }
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/bondiano/dsh-role-team.git"
-  },
-  "homepage": "https://github.com/bondiano/dsh-role-team#readme",
-  "bugs": {
-    "url": "https://github.com/bondiano/dsh-role-team/issues"
-  }
+	"name": "@local/dsh-role-team",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Role team for DeepSeek Harness: PLAN, WORKER, ADVISOR and REVIEWER agents with independently configured models and providers, an orchestrated work loop, a Settings → Models role picker, and a /roles command.",
+	"exports": {
+		".": "./dist/index.js",
+		"./client": "./dist/client.js",
+		"./locale/*.json": "./locale/*.json",
+		"./icon": "./icon.svg"
+	},
+	"files": [
+		"dist/*.js",
+		"cordis.patch.yml",
+		"locale/*.json",
+		"docs",
+		"CONTRIBUTING.md",
+		"README.md",
+		"README.ru.md",
+		"icon.svg",
+		"LICENSE"
+	],
+	"dsh": {
+		"bundle": {
+			"patch": "./cordis.patch.yml"
+		},
+		"client": {
+			"platform": "web",
+			"immediately": true,
+			"inject": [
+				"@deepseek-ai/dsh-client-ui-settings",
+				"@deepseek-ai/dsh-client-ui-settings-models",
+				"@deepseek-ai/dsh-client-ui-tool"
+			]
+		}
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/bondiano/dsh-role-team.git"
+	},
+	"homepage": "https://github.com/bondiano/dsh-role-team#readme",
+	"bugs": {
+		"url": "https://github.com/bondiano/dsh-role-team/issues"
+	},
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.13.0"
+	},
+	"scripts": {
+		"build": "tsc",
+		"typecheck": "tsc --noEmit",
+		"test": "npm run build && node --test dist/test/*.test.js",
+		"lint": "oxlint --deny-warnings .",
+		"lint:fix": "oxlint --fix --deny-warnings .",
+		"format": "oxfmt --write .",
+		"format:check": "oxfmt --check .",
+		"check": "npm run format:check && npm run lint && npm run typecheck && npm test",
+		"prepare": "npm run build",
+		"prepack": "npm run build"
+	},
+	"devDependencies": {
+		"@types/node": "22.18.6",
+		"@types/react": "19.3.0",
+		"oxfmt": "0.78.0",
+		"oxlint": "1.93.0",
+		"oxlint-tsgolint": "7.0.2006",
+		"typescript": "7.0.2"
+	}
 }
