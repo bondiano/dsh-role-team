@@ -14,6 +14,12 @@ interface ClientRoleInfo {
 	family?: string | null;
 	source?: string;
 	problem?: string;
+	validationError?: string;
+}
+interface ClientWarningItem {
+	kind: "worker_advisor" | "worker_reviewer" | "advisor_reviewer" | "inherit";
+	family?: string;
+	message?: string;
 }
 interface ClientModel {
 	id: string;
@@ -32,11 +38,22 @@ interface ClientSnapshot {
 	ok?: boolean;
 	error?: string;
 	roles?: Partial<Record<ClientRole, ClientRoleInfo>>;
+	warnings?: string[];
+	warningItems?: ClientWarningItem[];
+	maxRounds?: number;
+	maxPlanPasses?: number;
+	childMaxDepth?: number;
 }
 interface ClientApi {
-	load(): Promise<ClientSnapshot>;
+	load(validate?: boolean): Promise<ClientSnapshot>;
 	save(role: ClientRole, route: ClientRoute): Promise<ClientSnapshot>;
+	inherit?(role: ClientRole): Promise<ClientSnapshot>;
 	reset(role: ClientRole): Promise<ClientSnapshot>;
+	saveConfig?(patch: {
+		maxRounds?: number;
+		maxPlanPasses?: number;
+		childMaxDepth?: number;
+	}): Promise<ClientSnapshot>;
 	catalog(): Promise<ClientCatalog>;
 	onCatalogChange(listener: () => void): () => void;
 }
@@ -56,6 +73,7 @@ interface ClientRowProps {
 interface ClientPickerProps extends Omit<ClientRowProps, "onEdit" | "onReset"> {
 	error?: string;
 	onApply: (route: ClientRoute) => void;
+	onInherit?: () => void;
 	onCancel: () => void;
 }
 interface ClientToolBlock {
@@ -121,14 +139,8 @@ interface Window {
 /**
  * Browser half of `@local/dsh-role-team`.
  *
- * Adds the Role team section to **Settings → Models**: four role rows with
- * the model each role currently uses, a provider/model picker backed by the
- * live adapter catalogue, reasoning-effort selection, per-role reset, and the
- * same cross-family independence warnings the `/roles doctor` command prints.
- *
- * The page talks to the Host half through one same-origin JSON route. Model
- * choices come from the shared `remote.session.modelCatalog()` directory, so
- * only providers the running profile can actually route are offered.
+ * Adds the Role team section to **Settings → Models** and renders dedicated
+ * role-team cards in the chat timeline.
  */
 
 (window as Window).__ModuleLoader__.load({
@@ -187,6 +199,7 @@ interface Window {
 			recommended: "Recommended",
 			custom: "Custom",
 			inherit: "Inherits the session model",
+			useInherit: "Inherit session model",
 			unavailable: "not currently available",
 			chooseTitle: "Choose the model for {role}",
 			search: "Search models",
@@ -217,9 +230,15 @@ interface Window {
 			chooseEffort: "Effort",
 			modelUnavailable:
 				"This route is not advertised by any routable provider right now. Pick another model or reset the role.",
+			limitsTitle: "Loop limits",
+			maxRoundsLabel: "Max worker rounds",
+			maxPlanPassesLabel: "Max plan passes",
+			childMaxDepthLabel: "Child delegation depth",
 			runTitle: "Role team",
 			preparing: "Preparing…",
 			running: "Running…",
+			awaitingUser: "Awaiting your decision",
+			cancelRun: "Cancel run",
 			pipeline: "Pipeline",
 			comments: "ADVISOR and REVIEWER comments",
 			approved: "Approved",
@@ -262,6 +281,7 @@ interface Window {
 			recommended: "Рекомендуемая",
 			custom: "Своя",
 			inherit: "Наследует модель сессии",
+			useInherit: "Наследовать модель сессии",
 			unavailable: "сейчас недоступна",
 			chooseTitle: "Выберите модель для {role}",
 			search: "Поиск моделей",
@@ -292,9 +312,15 @@ interface Window {
 			chooseEffort: "Усилие",
 			modelUnavailable:
 				"Этот маршрут сейчас не предлагается ни одним доступным провайдером. Выберите другую модель или сбросьте роль.",
+			limitsTitle: "Лимиты цикла",
+			maxRoundsLabel: "Раунды WORKER",
+			maxPlanPassesLabel: "Проходы аудита плана",
+			childMaxDepthLabel: "Глубина делегирования",
 			runTitle: "Команда ролей",
 			preparing: "Подготовка…",
 			running: "Выполняется…",
+			awaitingUser: "Ожидает решения",
+			cancelRun: "Отменить запуск",
 			pipeline: "Конвейер",
 			comments: "Замечания ADVISOR и REVIEWER",
 			approved: "Одобрено",
@@ -336,6 +362,7 @@ interface Window {
 			recommended: "推荐",
 			custom: "自定义",
 			inherit: "继承会话模型",
+			useInherit: "继承会话模型",
 			unavailable: "当前不可用",
 			chooseTitle: "为 {role} 选择模型",
 			search: "搜索模型",
@@ -365,9 +392,15 @@ interface Window {
 			chooseEffort: "强度",
 			modelUnavailable:
 				"当前没有可路由的提供商提供此路由。请选择其他模型或重置该角色。",
+			limitsTitle: "循环限制",
+			maxRoundsLabel: "WORKER 最大轮数",
+			maxPlanPassesLabel: "计划审核轮数",
+			childMaxDepthLabel: "子代理最大深度",
 			runTitle: "角色团队",
 			preparing: "准备中…",
 			running: "运行中…",
+			awaitingUser: "等待您的决定",
+			cancelRun: "取消运行",
 			pipeline: "流水线",
 			comments: "ADVISOR 和 REVIEWER 的意见",
 			approved: "已通过",
@@ -461,6 +494,18 @@ interface Window {
 .dsh-rt-btn-quiet { border-color: transparent; color: var(--dsw-alias-label-secondary); }
 .dsh-rt-btn-primary { border: none; background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground); }
 @media (hover: hover) { .dsh-rt-btn-primary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); } }
+.dsh-rt-limits {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  padding: 10px 14px; border: 0.5px solid var(--dsw-alias-settings-card-stroke);
+  background: var(--dsw-alias-settings-card-fill); border-radius: var(--dsw-radius-xl);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+}
+.dsh-rt-limit-item { display: inline-flex; align-items: center; gap: 6px; }
+.dsh-rt-limit-input {
+  width: 48px; height: 26px; padding: 0 6px; border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 12px; text-align: center;
+}
 .dsh-rt-note {
   margin: 0; padding: 9px 12px; border: 0.5px solid var(--dsw-alias-border-l3);
   border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
@@ -531,6 +576,7 @@ interface Window {
 .dsh-rt-effort[aria-pressed="true"] { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l1); }
 .dsh-rt-effort:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary); }
 .dsh-rt-dialog-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 0.5px solid var(--dsw-alias-border-l3); }
+.dsh-rt-dialog-foot-left { margin-right: auto; }
 .dsh-rt-dialog-error { margin: 0; padding: 0 16px 12px; }
 @media (max-width: 760px) {
   .dsh-rt-row { grid-template-columns: minmax(0, 1fr) auto; }
@@ -574,6 +620,7 @@ interface Window {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dsh-rt-tool-body { display: flex; flex-direction: column; gap: 10px; padding: 0 12px 12px; }
+.dsh-rt-tool-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .dsh-rt-tool-task-full { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); word-break: break-word; }
 .dsh-rt-muted-line { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); font-style: italic; }
 .dsh-rt-section-label {
@@ -590,6 +637,9 @@ interface Window {
 .dsh-rt-stage-route {
   font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.dsh-rt-stage-time {
+  font-size: 10px; line-height: 14px; color: var(--dsw-alias-label-tertiary);
 }
 .dsh-rt-comment {
   border: 0.5px solid var(--dsw-alias-border-l3); border-radius: var(--dsw-radius-md);
@@ -612,12 +662,7 @@ interface Window {
 }
 `;
 
-		/**
-		 * Replace `{name}` placeholders in localized copy.
-		 * @param {string} text template
-		 * @param {Record<string, string> | undefined} params values
-		 * @returns {string} rendered text
-		 */
+		/** Replace `{name}` placeholders in localized copy. */
 		function fill(text: string, params?: Record<string, string>) {
 			if (params === undefined) return text;
 			let out = text;
@@ -626,11 +671,6 @@ interface Window {
 			return out;
 		}
 
-		/**
-		 * Render a thrown value without trusting coercion.
-		 * @param {unknown} error thrown value
-		 * @returns {string} message
-		 */
 		const stringValue = (value: unknown): string => String(value);
 
 		function messageOf(error: unknown) {
@@ -643,17 +683,23 @@ interface Window {
 			}
 		}
 
-		/**
-		 * Build the Host API the page talks to.
-		 * @param {object} ctx browser plugin context
-		 * @returns {object} API face
-		 */
+		function formatShortDuration(ms: unknown): string {
+			if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 500) return "";
+			const total = Math.max(1, Math.round(ms / 1000));
+			if (total < 60) return `${total}s`;
+			const minutes = Math.floor(total / 60);
+			const seconds = total % 60;
+			return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+		}
+
+		/** Build the Host API the page talks to. */
 		function createApi(ctx: ClientContext): ClientApi {
 			async function request(
 				method: string,
 				body?: unknown,
+				query = "",
 			): Promise<ClientSnapshot> {
-				const response = await fetch(ROUTE, {
+				const response = await fetch(`${ROUTE}${query}`, {
 					method,
 					credentials: "same-origin",
 					headers: {
@@ -678,10 +724,14 @@ interface Window {
 				return data;
 			}
 			return {
-				load: () => request("GET"),
+				load: (validate = false) =>
+					request("GET", undefined, validate ? "?validate=1" : ""),
 				save: (role: ClientRole, route: ClientRoute) =>
 					request("POST", { role, route }),
+				inherit: (role: ClientRole) =>
+					request("POST", { role, action: "inherit" }),
 				reset: (role: ClientRole) => request("POST", { role, action: "reset" }),
+				saveConfig: (patch) => request("POST", { action: "config", ...patch }),
 				async catalog() {
 					const response = await ctx.remote.session.modelCatalog();
 					if (!response.ok) throw new Error("model catalog is unavailable");
@@ -699,11 +749,7 @@ interface Window {
 
 		/**
 		 * Ask the Host whether a just-added session is a `/role-plan` session, and
-		 * open it when it is. Every failure stays silent: the session is still in
-		 * the list, and switching to it is a convenience, not part of the run.
-		 * @param {object} ctx browser plugin context
-		 * @param {string} sessionId identity from `api-session/added`
-		 * @returns {Promise<void>} resolves after the check
+		 * open it when it is.
 		 */
 		async function openPlanSession(ctx: ClientContext, sessionId: string) {
 			try {
@@ -725,17 +771,28 @@ interface Window {
 		}
 
 		/**
-		 * Localized family-independence warnings for the settings rows.
-		 * @param {object | undefined} roles snapshot roles
-		 * @param {(key: string, params?: object) => string} t translator
-		 * @returns {string[]} warnings
+		 * Localized family-independence warnings from server `warningItems`
+		 * (with fallback for minimal test snapshots that only pass `roles`).
 		 */
 		function independenceWarnings(
-			roles: ClientSnapshot["roles"] | undefined,
+			snapshot: ClientSnapshot | null | undefined,
 			t: ClientTranslator,
 		) {
-			const family = (role: ClientRole) => roles?.[role]?.family ?? null;
 			const label = (value: string) => FAMILY_LABEL[value] ?? value;
+			if (Array.isArray(snapshot?.warningItems)) {
+				return snapshot.warningItems.map((item) => {
+					const fam = label(item.family ?? "");
+					if (item.kind === "worker_advisor")
+						return fill(t("warningWorkerAdvisor"), { family: fam });
+					if (item.kind === "worker_reviewer")
+						return fill(t("warningWorkerReviewer"), { family: fam });
+					if (item.kind === "advisor_reviewer")
+						return fill(t("warningAdvisorReviewer"), { family: fam });
+					return t("warningInherit");
+				});
+			}
+			const roles = snapshot?.roles;
+			const family = (role: ClientRole) => roles?.[role]?.family ?? null;
 			const worker = family("worker");
 			const advisor = family("advisor");
 			const reviewer = family("reviewer");
@@ -754,12 +811,6 @@ interface Window {
 			return out;
 		}
 
-		/**
-		 * Find a provider group.
-		 * @param {object | undefined} catalog model catalog
-		 * @param {string} provider provider id
-		 * @returns {object | undefined} group
-		 */
 		function groupOf(
 			catalog: ClientCatalog | null | undefined,
 			provider: string,
@@ -767,12 +818,6 @@ interface Window {
 			return catalog?.groups?.find((group) => group.id === provider);
 		}
 
-		/**
-		 * Find one model inside its provider group.
-		 * @param {object | undefined} catalog model catalog
-		 * @param {{ provider: string, model: string } | null | undefined} route route
-		 * @returns {object | undefined} model
-		 */
 		function modelOf(
 			catalog: ClientCatalog | null | undefined,
 			route?: ClientRoute | null,
@@ -783,11 +828,7 @@ interface Window {
 			);
 		}
 
-		/**
-		 * One role row: current model, source, actions.
-		 * @param {object} props row props
-		 * @returns {object} React node
-		 */
+		/** One role row: current model, source, actions. */
 		function RoleRow({
 			role,
 			info,
@@ -861,6 +902,9 @@ interface Window {
 					info?.problem === undefined
 						? null
 						: h("span", { className: "dsh-rt-warn" }, info.problem),
+					info?.validationError === undefined
+						? null
+						: h("span", { className: "dsh-rt-warn" }, info.validationError),
 				),
 				h(
 					"div",
@@ -896,11 +940,7 @@ interface Window {
 			);
 		}
 
-		/**
-		 * Modal picker: provider, model, reasoning effort.
-		 * @param {object} props picker props
-		 * @returns {object} React node
-		 */
+		/** Modal picker: runtime, provider, model, reasoning effort, inherit. */
 		function ModelPicker({
 			role,
 			info,
@@ -909,6 +949,7 @@ interface Window {
 			busy,
 			error,
 			onApply,
+			onInherit,
 			onCancel,
 		}: ClientPickerProps) {
 			const groups = catalog?.groups ?? [];
@@ -1094,6 +1135,7 @@ interface Window {
 									t("externalModel"),
 									h("input", {
 										className: "dsh-rt-search",
+										autoFocus: true,
 										value: model,
 										disabled: busy,
 										"aria-label": t("externalModel"),
@@ -1120,7 +1162,7 @@ interface Window {
 						h("input", {
 							className: "dsh-rt-search",
 							type: "search",
-							autoFocus: true,
+							autoFocus: !external,
 							placeholder: t("search"),
 							"aria-label": t("search"),
 							value: query,
@@ -1218,6 +1260,19 @@ interface Window {
 				h(
 					"div",
 					{ className: "dsh-rt-dialog-foot" },
+					onInherit === undefined
+						? null
+						: h(
+								"button",
+								{
+									type: "button",
+									className:
+										"dsh-rt-btn dsh-rt-btn-quiet dsh-rt-dialog-foot-left",
+									disabled: busy,
+									onClick: onInherit,
+								},
+								t("useInherit"),
+							),
 					h(
 						"button",
 						{
@@ -1242,11 +1297,7 @@ interface Window {
 			);
 		}
 
-		/**
-		 * The Settings → Models section.
-		 * @param {object} props injected face
-		 * @returns {object | null} React node
-		 */
+		/** The Settings → Models section. */
 		function RoleTeamSection(props: ClientSectionProps) {
 			const { api, t } = props;
 			const [state, setState] = React.useState<{
@@ -1266,36 +1317,39 @@ interface Window {
 			const alive = React.useRef(true);
 			const loading = React.useRef(false);
 
-			const load = React.useCallback(async () => {
-				if (loading.current) return;
-				loading.current = true;
-				setState((previous) => ({
-					...previous,
-					status: previous.snapshot === null ? "loading" : "refreshing",
-					error: null,
-				}));
-				try {
-					const [snapshot, catalog] = await Promise.all([
-						api.load(),
-						api.catalog(),
-					]);
-					if (!alive.current) return;
-					setState({ status: "ready", snapshot, catalog, error: null });
-				} catch (error) {
-					if (!alive.current) return;
+			const load = React.useCallback(
+				async (validate = false) => {
+					if (loading.current) return;
+					loading.current = true;
 					setState((previous) => ({
 						...previous,
-						status: previous.snapshot === null ? "error" : "ready",
-						error: messageOf(error),
+						status: previous.snapshot === null ? "loading" : "refreshing",
+						error: null,
 					}));
-				} finally {
-					loading.current = false;
-				}
-			}, [api]);
+					try {
+						const [snapshot, catalog] = await Promise.all([
+							api.load(validate),
+							api.catalog(),
+						]);
+						if (!alive.current) return;
+						setState({ status: "ready", snapshot, catalog, error: null });
+					} catch (error) {
+						if (!alive.current) return;
+						setState((previous) => ({
+							...previous,
+							status: previous.snapshot === null ? "error" : "ready",
+							error: messageOf(error),
+						}));
+					} finally {
+						loading.current = false;
+					}
+				},
+				[api],
+			);
 
 			React.useEffect(() => {
 				alive.current = true;
-				void load();
+				void load(false);
 				return () => {
 					alive.current = false;
 				};
@@ -1304,7 +1358,7 @@ interface Window {
 			React.useEffect(
 				() =>
 					api.onCatalogChange(() => {
-						void load();
+						void load(false);
 					}),
 				[api, load],
 			);
@@ -1342,6 +1396,23 @@ interface Window {
 				}
 			};
 
+			const applyInherit = async () => {
+				if (editing === null || typeof api.inherit !== "function") return;
+				setSaving(true);
+				setSaveError(undefined);
+				try {
+					const snapshot = await api.inherit(editing.role);
+					if (!alive.current) return;
+					setState((previous) => ({ ...previous, snapshot, status: "ready" }));
+					setEditing(null);
+					setNotice(t("saved"));
+				} catch (error) {
+					setSaveError(messageOf(error));
+				} finally {
+					setSaving(false);
+				}
+			};
+
 			const resetRole = async (role: ClientRole) => {
 				setSaving(true);
 				setSaveError(undefined);
@@ -1357,8 +1428,28 @@ interface Window {
 				}
 			};
 
+			const updateLimit = async (
+				key: "maxRounds" | "maxPlanPasses" | "childMaxDepth",
+				value: number,
+			) => {
+				if (typeof api.saveConfig !== "function" || !Number.isInteger(value))
+					return;
+				setSaving(true);
+				setSaveError(undefined);
+				try {
+					const snapshot = await api.saveConfig({ [key]: value });
+					if (!alive.current) return;
+					setState((previous) => ({ ...previous, snapshot, status: "ready" }));
+					setNotice(t("saved"));
+				} catch (error) {
+					setSaveError(messageOf(error));
+				} finally {
+					setSaving(false);
+				}
+			};
+
 			const snapshot = state.snapshot;
-			const warnings = independenceWarnings(snapshot?.roles, t);
+			const warnings = independenceWarnings(snapshot, t);
 			const body =
 				state.status === "loading"
 					? h(
@@ -1381,7 +1472,7 @@ interface Window {
 										type: "button",
 										className: "dsh-rt-btn dsh-rt-retry",
 										onClick: () => {
-											void load();
+											void load(true);
 										},
 									},
 									t("retry"),
@@ -1413,6 +1504,83 @@ interface Window {
 											}),
 										),
 									),
+									typeof snapshot.maxRounds === "number"
+										? h(
+												"div",
+												{
+													className: "dsh-rt-limits",
+													role: "group",
+													"aria-label": t("limitsTitle"),
+												},
+												h(
+													"label",
+													{ className: "dsh-rt-limit-item" },
+													t("maxRoundsLabel"),
+													h("input", {
+														type: "number",
+														min: 1,
+														max: 6,
+														className: "dsh-rt-limit-input",
+														value: String(snapshot.maxRounds),
+														disabled: saving,
+														onChange: (
+															e: import("react").ChangeEvent<HTMLInputElement>,
+														) => {
+															void updateLimit(
+																"maxRounds",
+																Number(e.target.value),
+															);
+														},
+													}),
+												),
+												typeof snapshot.maxPlanPasses === "number"
+													? h(
+															"label",
+															{ className: "dsh-rt-limit-item" },
+															t("maxPlanPassesLabel"),
+															h("input", {
+																type: "number",
+																min: 1,
+																max: 3,
+																className: "dsh-rt-limit-input",
+																value: String(snapshot.maxPlanPasses),
+																disabled: saving,
+																onChange: (
+																	e: import("react").ChangeEvent<HTMLInputElement>,
+																) => {
+																	void updateLimit(
+																		"maxPlanPasses",
+																		Number(e.target.value),
+																	);
+																},
+															}),
+														)
+													: null,
+												typeof snapshot.childMaxDepth === "number"
+													? h(
+															"label",
+															{ className: "dsh-rt-limit-item" },
+															t("childMaxDepthLabel"),
+															h("input", {
+																type: "number",
+																min: 0,
+																max: 8,
+																className: "dsh-rt-limit-input",
+																value: String(snapshot.childMaxDepth),
+																disabled: saving,
+																onChange: (
+																	e: import("react").ChangeEvent<HTMLInputElement>,
+																) => {
+																	void updateLimit(
+																		"childMaxDepth",
+																		Number(e.target.value),
+																	);
+																},
+															}),
+														)
+													: null,
+											)
+										: null,
 									warnings.length === 0
 										? null
 										: h(
@@ -1467,7 +1635,7 @@ interface Window {
 								state.status === "loading" ||
 								state.status === "refreshing",
 							onClick: () => {
-								void load();
+								void load(true);
 							},
 						},
 						t("refresh"),
@@ -1487,6 +1655,12 @@ interface Window {
 							onApply: (route) => {
 								void applyRoute(route);
 							},
+							onInherit:
+								typeof api.inherit === "function"
+									? () => {
+											void applyInherit();
+										}
+									: undefined,
 							onCancel: closePicker,
 						}),
 			);
@@ -1505,9 +1679,7 @@ interface Window {
 		];
 
 		/**
-		 * Read the `task` argument out of a tool call's raw arguments.
-		 * @param {object} block preparing, started, or settled Tool block
-		 * @returns {string} the task text, or '' when unavailable
+		 * Read the `task`, `question`, or `run_id` argument out of a tool call's raw arguments.
 		 */
 		function taskOf(block: ClientToolBlock | null | undefined) {
 			try {
@@ -1522,17 +1694,19 @@ interface Window {
 				)
 					return "";
 				const parsed = JSON.parse(call.argsRaw);
-				return typeof parsed?.task === "string" ? parsed.task : "";
+				if (typeof parsed?.task === "string" && parsed.task !== "")
+					return parsed.task;
+				if (typeof parsed?.question === "string" && parsed.question !== "")
+					return parsed.question;
+				if (typeof parsed?.run_id === "string" && parsed.run_id !== "")
+					return parsed.run_id;
+				return "";
 			} catch {
 				return "";
 			}
 		}
 
-		/**
-		 * First text block of a settled result, for the plain-text fallback.
-		 * @param {object} block settled Tool result
-		 * @returns {string} its text, or ''
-		 */
+		/** First text block of a settled result, for the plain-text fallback. */
 		function rawTextOf(block: ClientToolBlock | null | undefined) {
 			const content = Array.isArray(block?.content) ? block.content : [];
 			const first = content.find(
@@ -1559,27 +1733,30 @@ interface Window {
 			minor: "severityMinor",
 		};
 
-		/**
-		 * Whether one metadata item is a plain object, so a malformed entry
-		 * degrades instead of throwing inside the toolview.
-		 * @param {unknown} value candidate
-		 * @returns {boolean} true for plain objects
-		 */
 		function isItem(value: unknown): value is ClientItem {
 			return (
 				value !== null && typeof value === "object" && !Array.isArray(value)
 			);
 		}
 
+		const TERMINAL_STATUSES = [
+			"approved",
+			"unapproved",
+			"continued",
+			"failed",
+			"cancelled",
+		];
+
 		/**
-		 * Poll the live run state of one call while its card is open and running.
-		 * Backs off after repeated failures so a settled or replayed call stops
-		 * polling instead of retrying a 404 forever.
-		 * @param {string | undefined} callId tool call id
-		 * @param {boolean} active whether the call is running and its body is visible
-		 * @returns {object | null} the live run state
+		 * Poll the live run state of one call while it is running (including
+		 * collapsed `roles_start` cards so the header status pill updates when the
+		 * background run completes). Pauses while the document is hidden.
 		 */
-		function useRunState(callId: string | undefined, active: boolean) {
+		function useRunState(
+			callId: string | undefined,
+			active: boolean,
+			expanded: boolean,
+		) {
 			const [run, setRun] = React.useState<ClientItem | null>(null);
 			React.useEffect(() => {
 				if (!active || !callId) return undefined;
@@ -1592,6 +1769,8 @@ interface Window {
 				};
 				const load = async () => {
 					if (!alive) return;
+					if (typeof document !== "undefined" && document.hidden === true)
+						return;
 					try {
 						const response = await fetch(
 							`/plugin-api/role-team/run/${encodeURIComponent(callId)}`,
@@ -1612,16 +1791,9 @@ interface Window {
 						if (alive && data && data.ok) {
 							failures = 0;
 							setRun(data.run);
-							if (
-								[
-									"approved",
-									"unapproved",
-									"continued",
-									"failed",
-									"cancelled",
-								].includes(String(data.run?.status))
-							)
+							if (TERMINAL_STATUSES.includes(String(data.run?.status))) {
 								stop();
+							}
 						}
 					} catch {
 						failures += 1;
@@ -1629,22 +1801,41 @@ interface Window {
 					}
 				};
 				void load();
-				timer = setInterval(() => {
-					void load();
-				}, 2500);
+				timer = setInterval(
+					() => {
+						void load();
+					},
+					expanded ? 2500 : 4000,
+				);
+				const onVisibilityChange = () => {
+					if (typeof document !== "undefined" && !document.hidden) {
+						void load();
+					}
+				};
+				if (
+					typeof document !== "undefined" &&
+					typeof document.addEventListener === "function"
+				) {
+					document.addEventListener("visibilitychange", onVisibilityChange);
+				}
 				return () => {
 					alive = false;
 					stop();
+					if (
+						typeof document !== "undefined" &&
+						typeof document.removeEventListener === "function"
+					) {
+						document.removeEventListener(
+							"visibilitychange",
+							onVisibilityChange,
+						);
+					}
 				};
-			}, [callId, active]);
+			}, [callId, active, expanded]);
 			return run;
 		}
 
-		/**
-		 * The dedicated chat-timeline card for one role tool call.
-		 * @param {object} props owner props of the keyed toolview
-		 * @returns {object} React node
-		 */
+		/** The dedicated chat-timeline card for one role tool call. */
 		function RoleToolRow(props: ClientToolProps) {
 			const { toolName, block, useDisclosure } = props;
 			const t = typeof props.t === "function" ? props.t : (key: string) => key;
@@ -1669,12 +1860,15 @@ interface Window {
 					: null;
 			const background =
 				storedMeta !== null && typeof storedMeta.runId === "string";
-			const backgroundActive =
+			const backgroundInitiallyActive =
 				background &&
 				["running", "cancelling"].includes(String(storedMeta.status));
+			// Poll background runs even when collapsed until they reach a terminal state,
+			// and poll foreground in-flight runs when expanded.
 			const live = useRunState(
 				background ? (storedMeta.runId as string) : callId,
-				(inFlight || backgroundActive) && disclosure.expanded,
+				backgroundInitiallyActive || (inFlight && disclosure.expanded),
+				disclosure.expanded,
 			);
 			const meta =
 				background && live !== null ? { ...storedMeta, ...live } : storedMeta;
@@ -1693,7 +1887,6 @@ interface Window {
 				meta !== null && Array.isArray(meta.comments) ? meta.comments : []
 			).filter(isItem);
 			if (comments.length === 0 && verdict !== null) {
-				// A single-role ADVISOR/REVIEWER call: its own verdict is the comment.
 				comments.push({
 					role:
 						typeof meta?.role === "string"
@@ -1712,33 +1905,36 @@ interface Window {
 				meta !== null && Array.isArray(meta.decisions) ? meta.decisions : []
 			).filter(isItem);
 
+			const activePhase = meta?.phase ?? live?.phase;
 			const statusKey = preparing
 				? "preparing"
-				: inFlight
-					? "running"
-					: isError
-						? "failed"
-						: verdict !== null
-							? verdict.approved
-								? "approved"
-								: "changes"
-							: meta === null
-								? "finished"
-								: meta.status === "running"
-									? "running"
-									: meta.status === "cancelling"
-										? "cancelling"
-										: meta.status === "cancelled"
-											? "cancelled"
-											: meta.status === "failed"
-												? "failed"
-												: meta.status === "approved"
-													? "approved"
-													: meta.status === "continued"
-														? "continued"
-														: meta.status === "unapproved"
-															? "notApproved"
-															: "finished";
+				: activePhase === "awaiting_user"
+					? "awaitingUser"
+					: inFlight
+						? "running"
+						: isError
+							? "failed"
+							: verdict !== null
+								? verdict.approved
+									? "approved"
+									: "changes"
+								: meta === null
+									? "finished"
+									: meta.status === "running"
+										? "running"
+										: meta.status === "cancelling"
+											? "cancelling"
+											: meta.status === "cancelled"
+												? "cancelled"
+												: meta.status === "failed"
+													? "failed"
+													: meta.status === "approved"
+														? "approved"
+														: meta.status === "continued"
+															? "continued"
+															: meta.status === "unapproved"
+																? "notApproved"
+																: "finished";
 			const pillClass =
 				statusKey === "approved"
 					? "dsh-rt-pill dsh-rt-pill-ok"
@@ -1746,7 +1942,8 @@ interface Window {
 						? "dsh-rt-pill dsh-rt-pill-err"
 						: statusKey === "preparing" || statusKey === "running"
 							? "dsh-rt-pill dsh-rt-pill-run"
-							: statusKey === "changes" ||
+							: statusKey === "awaitingUser" ||
+								  statusKey === "changes" ||
 								  statusKey === "notApproved" ||
 								  statusKey === "continued"
 								? "dsh-rt-pill dsh-rt-pill-warn"
@@ -1758,31 +1955,16 @@ interface Window {
 				? t("runTitle")
 				: `${t("runTitle")} · ${ROLE_LABEL[role] ?? toolName}`;
 
-			/**
-			 * One route rendered as provider/model text.
-			 * @param {object | null | undefined} route role route
-			 * @returns {string} display text
-			 */
 			const routeText = (route: unknown) =>
 				route == null || !isItem(route)
 					? t("inheritRoute")
 					: `${route.runtime && route.runtime !== "native" ? `${stringValue(route.runtime)}:` : ""}${stringValue(route.provider)}/${stringValue(route.model)}${route.reasoningEffort === undefined ? "" : ` @${stringValue(route.reasoningEffort)}`}`;
 
-			/**
-			 * One localized severity tag.
-			 * @param {unknown} severity raw severity
-			 * @returns {string} display text
-			 */
 			const severityText = (severity: unknown) => {
 				const key = SEVERITY_KEYS[stringValue(severity ?? "").toLowerCase()];
 				return key === undefined ? stringValue(severity ?? "major") : t(key);
 			};
 
-			/**
-			 * One localized decision line.
-			 * @param {object} decision decision entry
-			 * @returns {string} display text
-			 */
 			const decisionText = (decision: ClientItem) => {
 				const key = DECISION_KEYS[stringValue(decision.choice ?? "")];
 				const choice =
@@ -1797,15 +1979,62 @@ interface Window {
 				return `${choice}${route}${note}`;
 			};
 
+			const canCancelBackground =
+				background &&
+				typeof meta?.runId === "string" &&
+				meta.status === "running";
+			const requestCancel = () => {
+				if (!canCancelBackground || typeof meta?.runId !== "string") return;
+				void fetch(
+					`/plugin-api/role-team/run/${encodeURIComponent(meta.runId)}?action=cancel`,
+					{
+						method: "POST",
+						credentials: "same-origin",
+						headers: {
+							accept: "application/json",
+							"x-role-team-request": "1",
+						},
+					},
+				);
+			};
+
+			const childActivity =
+				isItem(meta?.child) && typeof meta.child.activity === "string"
+					? meta.child.activity
+					: "";
+
 			const body = disclosure.expanded
 				? h(
 						"div",
 						{ className: "dsh-rt-tool-body", id: bodyId },
-						task !== ""
-							? h("p", { className: "dsh-rt-tool-task-full" }, task)
+						task !== "" || canCancelBackground
+							? h(
+									"div",
+									{ className: "dsh-rt-tool-bar" },
+									task !== ""
+										? h("p", { className: "dsh-rt-tool-task-full" }, task)
+										: h("span", null),
+									canCancelBackground
+										? h(
+												"button",
+												{
+													type: "button",
+													className: "dsh-rt-btn dsh-rt-btn-quiet",
+													onClick: requestCancel,
+												},
+												t("cancelRun"),
+											)
+										: null,
+								)
 							: null,
 						typeof meta?.progress === "string"
-							? h("p", { className: "dsh-rt-muted-line" }, meta.progress)
+							? h(
+									"p",
+									{ className: "dsh-rt-muted-line" },
+									childActivity
+										? `${meta.progress} (${childActivity})`
+										: meta.progress,
+								)
 							: null,
 						stages.length > 0
 							? h(
@@ -1819,8 +2048,11 @@ interface Window {
 									h(
 										"div",
 										{ className: "dsh-rt-stages" },
-										stages.map((stage, index) =>
-											h(
+										stages.map((stage, index) => {
+											const durationLabel = formatShortDuration(
+												stage.durationMs,
+											);
+											return h(
 												"span",
 												{
 													key: index,
@@ -1845,8 +2077,15 @@ interface Window {
 													{ className: "dsh-rt-stage-route" },
 													routeText(stage.route),
 												),
-											),
-										),
+												durationLabel !== ""
+													? h(
+															"span",
+															{ className: "dsh-rt-stage-time" },
+															durationLabel,
+														)
+													: null,
+											);
+										}),
 									),
 								)
 							: inFlight

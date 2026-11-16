@@ -160,6 +160,12 @@ test("runtime picker preserves external route on reopen and allows manual model 
 			node.type === "input" && node.props["aria-label"] === "externalModel",
 	)!;
 	assert.equal(field.props.value, "factory-model");
+	assert.equal(field.props.autoFocus, true);
+	const search = find(
+		tree,
+		(node) => node.type === "input" && node.props["aria-label"] === "search",
+	)!;
+	assert.equal(search.props.autoFocus, false);
 	field.props.onChange!({ target: { value: "another-model" } });
 	tree = picker.render();
 	const apply = find(

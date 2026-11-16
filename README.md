@@ -59,21 +59,25 @@ Model-facing tools:
 
 Chat commands:
 
-- `/roles` — show the routes and their sources.
-- `/roles set <role> <provider>/<model>[:effort]` — validate the route against
-  the live LLM runtime, then persist it in the profile patch.
+- `/roles` — show the routes, loop limits and their sources.
+- `/roles set <role> <provider>/<model>[:effort] | inherit` — validate the route against
+  the live LLM runtime (or set `inherit`), then persist it in the profile patch.
+- `/roles inherit <role>` — configure the role to inherit the caller's session model.
 - `/roles reset <role>` — remove a saved override and fall back to the
   recommended default (or the inherited session model).
+- `/roles config [maxRounds|maxPlanPasses|childMaxDepth] [value]` — inspect or persist
+  the loop limits (`maxRounds` 1–6, `maxPlanPasses` 1–3, `childMaxDepth` 0–8).
 - `/roles models [provider]` — list registered providers and their advertised
   models, so the route ids are discoverable.
-- `/roles doctor` — validate every route and warn when the worker, advisor and
+- `/roles doctor` — validate every route in parallel and warn when the worker, advisor and
   reviewer are not from independent model families.
 - `/roles run <task>` — start the full team in the background.
-- `/roles status [run-id]` — inspect a background run in this session.
+- `/roles status [run-id]` — inspect a background run in this session (along with recent session runs).
+- `/roles list` — list recent background runs in this session.
 - `/roles cancel [run-id]` — cancel a background run in this session.
-- `/role-plan <task or plan.md>` — start the full role-team process on demand,
+- `/role-plan [--plan <plan.md>] <task or plan.md>` — start the full role-team process on demand,
   instead of the lead agent's ordinary execution. With a task, PLAN writes the
-  plan; with a path to a Markdown plan file (for example a Jev plan artifact,
+  plan; with a path to a Markdown plan file (passed as a single `.md` path, an existing leading `.md` file + custom task, or via `--plan <plan.md> [task]`,
   resolved against the session workspace), the plan is read from the file and
   PLAN is skipped. The command does not run the pipeline in the session that
   typed it: it creates a dedicated session in the same working directory, hands
@@ -175,13 +179,15 @@ section below the provider cards:
   reasoning effort, and a **Recommended / Custom / Inherits the session model**
   badge;
 - **Change** opens a picker over the live adapter catalogue: provider list,
-  model search, and the model's reasoning efforts, with **Default** meaning no
-  explicit effort;
+  model search, the model's reasoning efforts (with **Default** meaning no
+  explicit effort), and an **Inherit session model** button;
 - **Reset** removes a saved route and returns the role to the recommended
   default;
-- the section shows the same cross-family warnings as `/roles doctor` and marks
-  a stored route that no routable provider advertises as not currently
-  available.
+- **Loop limits** lets you adjust `maxRounds` (1–6), `maxPlanPasses` (1–3), and
+  `childMaxDepth` (0–8) directly from the page;
+- the section shows the same cross-family warnings as `/roles doctor`, validates
+  routes on refresh, and marks a stored route that no routable provider
+  advertises as not currently available.
 
 The picker also supports **Cursor** and **Factory Droid** when the matching
 `agentRuntime` is installed in the profile. Enter the runtime's model ID
@@ -264,11 +270,11 @@ session, so the gate cannot be used as a first reviewer by accident.
 The browser half registers dedicated cards for the role tools in the chat
 timeline (keyed `tool.call.toolview` rows):
 
-- a role badge with the stage's provider/model route, and a status pill
-  (running, approved, changes required, continued without approval, failed);
-- while a run is in flight, the card polls the live run state
-  (`GET /plugin-api/role-team/run/<callId>`, loopback-guarded) and shows the
-  pipeline with the currently active role highlighted;
+- a role badge with the stage's provider/model route and duration, and a status pill
+  (running, awaiting your decision, approved, changes required, continued without approval, failed);
+- while a run is in flight (including collapsed `roles_start` cards, pausing when the browser tab is hidden), the card polls the live run state
+  (`GET /plugin-api/role-team/run/<callId>`, loopback-guarded), shows the
+  pipeline with the currently active role highlighted, and offers a **Cancel run** button for active background runs;
 - once settled, the card reads the structured metadata persisted with the tool
   result and renders the ADVISOR and REVIEWER comments — verdict, summary and
   each issue with its severity — plus the user's exhaustion decisions, with the

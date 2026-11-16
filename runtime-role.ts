@@ -89,17 +89,19 @@ export async function runRuntimeRole<Agent extends object, Role extends string>(
 		onActivity?: (activity: RuntimeActivity) => void;
 	},
 ): Promise<RuntimeRoleResult<Role>> {
+	if (signal?.aborted) throw new Error("role team was cancelled");
 	const service = ctx.get("agentRuntime");
 	if (!service) throw new Error(`Runtime unavailable: ${route.runtime}`);
 	const directory =
 		cwd ?? (await ctx.get("workingDirectory")?.ensure(parent, signal));
 	if (!directory) throw new Error("Role runtime requires a working directory");
+	if (signal?.aborted) throw new Error("role team was cancelled");
 	const startedAt = Date.now();
 	const session = await service.create(
 		{
 			runtime: route.runtime,
 			cwd: directory,
-			model: route.model,
+			model: route.provider && !route.runtime ? route.model : route.model,
 			provider: route.provider,
 			reasoningEffort: route.reasoningEffort,
 		},
@@ -120,6 +122,10 @@ export async function runRuntimeRole<Agent extends object, Role extends string>(
 			{ text: isolatedPrompt },
 			{ parent, signal },
 		)) {
+			if (signal?.aborted) {
+				status = "cancelled";
+				break;
+			}
 			if (event.type === "text") {
 				text = `${text}${event.text ?? ""}`.slice(-14000);
 				onActivity?.({ progress: text.slice(-1800) });
@@ -132,7 +138,11 @@ export async function runRuntimeRole<Agent extends object, Role extends string>(
 			if (event.type === "settled") status = event.status;
 		}
 	} finally {
-		await service.close(session.id);
+		try {
+			await service.close(session.id);
+		} catch {
+			// Disposal failure must not mask the captured runtime result or error.
+		}
 	}
 	if (signal?.aborted || ["cancelled", "aborted"].includes(status))
 		throw new Error("role team was cancelled");

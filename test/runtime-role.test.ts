@@ -156,3 +156,37 @@ test("external role cwd resolves from live parent and no native services are req
 	assert.equal(result.text, "result");
 	assert.equal(result.cwd, "/isolated");
 });
+
+test("external role ignores close errors in finally and aborts cleanly on signal", async () => {
+	const controller = new AbortController();
+	const runtime = {
+		async create() {
+			return { id: "s", cwd: "/isolated" };
+		},
+		async *send() {
+			yield { type: "text", text: "partial" };
+			controller.abort();
+			yield { type: "text", text: "ignored" };
+		},
+		async close() {
+			throw new Error("close failed");
+		},
+	};
+	const ctx = {
+		get(name: string) {
+			return name === "agentRuntime"
+				? runtime
+				: { ensure: async () => "/actual" };
+		},
+	} as unknown as RuntimeContext;
+	await assert.rejects(
+		runRuntimeRole(ctx, {
+			route: { runtime: "cursor", provider: "cursor", model: "m" },
+			role: "worker",
+			prompt: "go",
+			parent: {},
+			signal: controller.signal,
+		}),
+		/role team was cancelled/,
+	);
+});

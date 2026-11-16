@@ -1596,3 +1596,303 @@ test("background status identifies the exhaustion question as awaiting the user"
 		"unapproved",
 	);
 });
+
+test("parseVerdict handles >12 preceding JSON objects, severity synonyms, and negated blocker phrases", () => {
+	const noise = Array.from({ length: 20 }, (_, i) => `{"step": ${i}}`).join(
+		"\n",
+	);
+	const afterNoise = parseVerdict(
+		`${noise}\n${verdict(true, [{ severity: "nit", detail: "minor style" }], "clean")}`,
+	);
+	assert.equal(afterNoise.parsed, true);
+	assert.equal(afterNoise.approved, true);
+	assert.equal(afterNoise.issues[0]!.severity, "minor");
+
+	const criticalBlocks = parseVerdict(
+		verdict(true, [{ severity: "CRITICAL", detail: "race condition" }]),
+	);
+	assert.equal(criticalBlocks.approved, false);
+	assert.equal(criticalBlocks.issues[0]!.severity, "blocker");
+
+	const negatedBlocker = parseVerdict(
+		"No blocker issues found.\nFinal verdict: APPROVED",
+	);
+	assert.equal(negatedBlocker.approved, true);
+	assert.equal(negatedBlocker.parsed, false);
+});
+
+test("WORKER reporting STATUS: blocked skips ADVISOR in runRoleTeam and blocks standalone role_reviewer", async () => {
+	const harness = makeHarness({
+		config: { maxRounds: 2 },
+		responses: {
+			plan: ["STEPS:\n1. Do it"],
+			worker: [
+				"CHANGES: none\nSTATUS: blocked\nNOTES: missing database fixture",
+				"CHANGES: added fixture\nSTATUS: done",
+			],
+			advisor: [
+				verdict(true, [], "plan ok"),
+				verdict(true, [], "round 2 work ok"),
+			],
+			reviewer: [verdict(true, [], "approved")],
+		},
+	});
+	const outcome = await harness.tools
+		.get("roles_run")
+		.execute({ task: "Do it" }, { agent: AGENT, signal: SIGNAL });
+	assert.equal(outcome.status, "approved");
+	// ADVISOR ran only twice (1 plan audit + 1 round-2 audit), skipped in round 1 when worker was blocked
+	assert.equal(
+		harness.calls.filter((call) => call.role === "advisor").length,
+		2,
+	);
+	const secondWorker = harness.calls.filter(
+		(call) => call.role === "worker",
+	)[1]!;
+	assert.match(secondWorker.prompt, /missing database fixture/);
+
+	// After roles_run completes a worker, standalone role_reviewer is unlocked even with a fresh Agent wrapper
+	const reviewResult = await harness.tools
+		.get("role_reviewer")
+		.execute(
+			{ task: "Do it" },
+			{ agent: { session: { id: AGENT.session.id } }, signal: SIGNAL },
+		);
+	assert.match(reviewResult.text, /Role REVIEWER/);
+
+	// A standalone role_worker that reports STATUS: blocked does not unlock role_reviewer
+	const blockedHarness = makeHarness({
+		responses: {
+			worker: ["CHANGES: none\nSTATUS: blocked\nNOTES: missing env"],
+		},
+	});
+	await blockedHarness.tools
+		.get("role_worker")
+		.execute({ task: "try it" }, { agent: AGENT, signal: SIGNAL });
+	await assert.rejects(
+		blockedHarness.tools
+			.get("role_reviewer")
+			.execute({ task: "check it" }, { agent: AGENT, signal: SIGNAL }),
+		/REVIEWER is the final gate/,
+	);
+});
+
+test("askWorkerModelRoute interleaves models across providers when the first provider has 40+ models", async () => {
+	let capturedOptions: readonly { label: string; description: string }[] = [];
+	const harness = makeHarness({
+		config: { maxRounds: 1 },
+		llm: {
+			async resolveCallConfig() {
+				return {};
+			},
+			listProviders() {
+				return [
+					{ id: "big-provider", name: "Big" },
+					{ id: "second-provider", name: "Second" },
+				];
+			},
+			async listModels(provider) {
+				if (provider === "big-provider") {
+					return Array.from({ length: 50 }, (_, i) => ({
+						id: `deepseek-model-${i}`,
+						name: `Model ${i}`,
+					}));
+				}
+				return [{ id: "claude-sonnet-5", name: "Claude Sonnet 5" }];
+			},
+		},
+		askUser: async (request) => {
+			const q = request.questions[0]!;
+			if (q.id === "exhaustion") {
+				return {
+					answers: [
+						{ id: "exhaustion", selected: ["Change the WORKER model"] },
+					],
+				};
+			}
+			capturedOptions = q.options;
+			return {
+				answers: [
+					{
+						id: "worker-model",
+						selected: ["second-provider/claude-sonnet-5"],
+					},
+				],
+			};
+		},
+		responses: {
+			plan: ["STEPS:\n1. Do it"],
+			worker: ["STATUS: done", "STATUS: done"],
+			advisor: [
+				verdict(true),
+				verdict(false, [{ severity: "major", detail: "retry" }]),
+				verdict(true),
+			],
+			reviewer: [verdict(true)],
+		},
+	});
+	const outcome = await harness.tools
+		.get("roles_run")
+		.execute({ task: "Do it" }, { agent: AGENT, signal: SIGNAL });
+	assert.equal(outcome.status, "approved");
+	assert.ok(
+		capturedOptions.some(
+			(option) => option.label === "second-provider/claude-sonnet-5",
+		),
+		"second provider must not be starved by a 50-model first provider",
+	);
+});
+
+test("/roles inherit, /roles config, /roles list, HTTP config/inherit/validate and run cancel route work end to end", async (t) => {
+	let finishPlan!: (text: string) => void;
+	const harness = makeHarness({
+		responses: {
+			plan: [
+				"STEPS:\n1. First run",
+				() =>
+					new Promise<string>((resolve) => {
+						finishPlan = resolve;
+					}),
+			],
+			worker: ["STATUS: done"],
+			advisor: [verdict(true), verdict(true)],
+			reviewer: [verdict(true)],
+		},
+	});
+	t.after(() => harness.close());
+	const rolesCmd = harness.commands.get("roles");
+
+	const inherited = await rolesCmd.handler({
+		agent: AGENT,
+		rawInput: "inherit advisor",
+		signal: SIGNAL,
+	});
+	assert.equal(inherited.kind, "success");
+	assert.equal(harness.entry.options.config.roles?.advisor, null);
+
+	const cfgUpdated = await rolesCmd.handler({
+		agent: AGENT,
+		rawInput: "config maxRounds 5",
+		signal: SIGNAL,
+	});
+	assert.equal(cfgUpdated.kind, "success");
+	assert.equal(harness.entry.options.config.maxRounds, 5);
+
+	const url = "http://127.0.0.1:62592/plugin-api/role-team/roles?validate=1";
+	const host = { host: "127.0.0.1:62592" };
+	const getAfterCli = await (
+		await handleRolesRoute(harness.ctx, new Request(url, { headers: host }))
+	).json();
+	assert.equal(getAfterCli.roles.advisor.route, null);
+	assert.equal(getAfterCli.roles.advisor.source, "inherit");
+	assert.equal(getAfterCli.maxRounds, 5);
+
+	const postConfig = await (
+		await handleRolesRoute(
+			harness.ctx,
+			new Request(url, {
+				method: "POST",
+				headers: {
+					...host,
+					"content-type": "application/json",
+					"x-role-team-request": "1",
+				},
+				body: JSON.stringify({
+					action: "config",
+					maxRounds: 4,
+					maxPlanPasses: 3,
+					childMaxDepth: 1,
+				}),
+			}),
+		)
+	).json();
+	assert.equal(postConfig.maxRounds, 4);
+	assert.equal(postConfig.maxPlanPasses, 3);
+	assert.equal(postConfig.childMaxDepth, 1);
+
+	// Run 1 completes, Run 2 stays running and is cancelled via HTTP run route
+	const run1 = await harness.tools
+		.get("roles_start")
+		.execute({ task: "First task" }, { agent: AGENT });
+	await tick();
+	await tick();
+	assert.equal(
+		(
+			await harness.tools
+				.get("roles_status")
+				.execute({ run_id: run1.runId }, { agent: AGENT })
+		).status,
+		"approved",
+	);
+
+	const run2 = await harness.tools
+		.get("roles_start")
+		.execute({ task: "Second task" }, { agent: AGENT });
+	await tick();
+
+	const statusWithHistory = await harness.tools
+		.get("roles_status")
+		.execute({}, { agent: AGENT });
+	assert.equal(statusWithHistory.recentRuns?.length, 2);
+	assert.match(statusWithHistory.text, /Recent runs in session:/);
+
+	const listOut = await rolesCmd.handler({
+		agent: AGENT,
+		rawInput: "list",
+		signal: SIGNAL,
+	});
+	assert.equal(listOut.kind, "success");
+	assert.ok(listOut.text.includes(run1.runId));
+	assert.ok(listOut.text.includes(run2.runId));
+
+	const cancelViaHttp = handleRunStateRequest(
+		harness.ctx,
+		new Request(
+			`http://127.0.0.1:62592/plugin-api/role-team/run/${run2.runId}?action=cancel`,
+			{
+				method: "POST",
+				headers: { ...host, "x-role-team-request": "1" },
+			},
+		),
+	);
+	assert.equal(cancelViaHttp.status, 200);
+	assert.equal((await cancelViaHttp.json()).run.status, "cancelling");
+	finishPlan("STEPS:\n1. Done");
+	await tick();
+});
+
+test("/role-plan treats multi-word sentences ending in .md as tasks and supports --plan flag", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "role-plan-sentence-"));
+	const file = join(dir, "plan.md");
+	await writeFile(file, "STEPS:\n1. From file\n", "utf8");
+
+	const harness = makeHarness({ cwd: dir });
+	const command = harness.commands.get("role-plan");
+
+	// Sentence ending with a non-existent .md path is treated as a task, not a broken file path
+	const sentenceRun = await command.handler({
+		agent: AGENT,
+		rawInput: "Implement the retry policy described in docs/design.md",
+		signal: SIGNAL,
+	});
+	assert.equal(sentenceRun.kind, "success");
+	const sentencePrompt = harness.prompted[0]!.content[0]!.text;
+	assert.ok(
+		sentencePrompt.includes(
+			"Implement the retry policy described in docs/design.md",
+		),
+	);
+	assert.ok(!sentencePrompt.includes("<<<PLAN"));
+
+	// Explicit --plan flag with custom task
+	const flagRun = await command.handler({
+		agent: AGENT,
+		rawInput: "--plan plan.md Focus on backwards compatibility",
+		signal: SIGNAL,
+	});
+	assert.equal(flagRun.kind, "success");
+	const flagPrompt = harness.prompted[1]!.content[0]!.text;
+	assert.ok(flagPrompt.includes("Focus on backwards compatibility"));
+	assert.ok(flagPrompt.includes("STEPS:\n1. From file"));
+	assert.ok(flagPrompt.includes("<<<PLAN"));
+});

@@ -428,4 +428,54 @@ test("the client half registers settings and foreground/background role tool car
 	assert.ok(advisorText.includes("glm-5.3"));
 	assert.ok(advisorText.includes("tests missing"));
 	assert.ok(advisorText.includes("severityMajor"));
+
+	// awaiting_user phase, stage durationMs, child activity, cancelRun button, and status question title
+	const awaitingCard = Card({
+		toolName: "roles_start",
+		callId: "c8",
+		t: (key) => key,
+		useDisclosure: () => ({ expanded: true, toggle: () => {} }),
+		block: {
+			kind: "tool-result",
+			isError: false,
+			meta: {
+				v: 1,
+				tool: "roles_start",
+				runId: "roles-bg-1",
+				status: "running",
+				phase: "awaiting_user",
+				task: "Fix edge cases",
+				progress: "Waiting for your decision",
+				child: { id: "c-1", activity: "thinking" },
+				stages: [
+					{
+						role: "plan",
+						route: { provider: "opencode-go", model: "gpt-6-luna" },
+						status: "done",
+						durationMs: 12000,
+					},
+				],
+			},
+			content: [{ type: "text", text: "Running" }],
+			call: { name: "roles_start", argsRaw: '{"task":"Fix edge cases"}' },
+		},
+	});
+	const awaitingText = JSON.stringify(awaitingCard);
+	assert.ok(awaitingText.includes("awaitingUser"));
+	assert.ok(awaitingText.includes("cancelRun"));
+	assert.ok(awaitingText.includes("12s"));
+	assert.ok(awaitingText.includes("thinking"));
+
+	const statusInFlight = Card({
+		toolName: "roles_status",
+		callId: "c9",
+		t: (key) => key,
+		useDisclosure: () => ({ expanded: false, toggle: () => {} }),
+		block: {
+			phase: "start",
+			name: "roles_status",
+			argsRaw: '{"run_id":"roles-bg-1","question":"How is it going?"}',
+		},
+	});
+	assert.ok(JSON.stringify(statusInFlight).includes("How is it going?"));
 });

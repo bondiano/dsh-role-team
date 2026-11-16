@@ -66,10 +66,11 @@ Run `/roles` to see the current table. Change a role with:
 /roles set reviewer openai-codex/gpt-6-sol
 ```
 
-Routes are validated against the live adapters before they are saved; credentials are verified by the first role run. Use
-`/roles models` to discover provider ids and `/roles models <provider>` to list
-a provider's models. `/roles reset <role>` returns to the recommended default;
-a role configured as `null` in `cordis.patch.yml` follows the session model.
+Routes are validated against the live adapters before they are saved; credentials are verified by the first role run. Use `/roles models` to discover provider ids and `/roles models <provider>` to list
+a provider's models. `/roles inherit <role>` configures a role to follow the
+caller's session model (`null` in `cordis.patch.yml`); `/roles reset <role>`
+returns to the recommended default. `/roles config <maxRounds|maxPlanPasses|childMaxDepth> <value>`
+updates the loop limits, and `/roles list` lists recent background runs in the current session.
 
 The recommended setup keeps the worker, advisor and reviewer in different
 families (DeepSeek, GLM, Qwen). `/roles doctor` reports the resolved routes

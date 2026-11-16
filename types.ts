@@ -11,6 +11,16 @@ export interface Agent {
 	session: { id: string };
 }
 export type Disposer = () => unknown;
+export type WarningKind =
+	| "worker_advisor"
+	| "worker_reviewer"
+	| "advisor_reviewer"
+	| "inherit";
+export interface IndependenceWarning {
+	kind: WarningKind;
+	family?: string;
+	message: string;
+}
 export interface RoleTeamConfig {
 	roles: Record<Role, Route | null>;
 	sources: Record<Role, "config" | "default" | "inherit">;
@@ -63,7 +73,7 @@ export interface Decision {
 export interface Round {
 	number: number;
 	worker: RoleResult;
-	advisor: RoleResult;
+	advisor?: RoleResult;
 	advisorVerdict: Verdict;
 	reviewer?: RoleResult;
 	reviewerVerdict?: Verdict;
@@ -108,6 +118,7 @@ export interface RunOptions {
 	signal?: AbortSignal;
 	config: RoleTeamConfig;
 	callId?: string;
+	tool?: string;
 	onState?: (state: Partial<RunState>) => void;
 	onChild?: (child: ChildTarget | undefined) => void;
 }
@@ -215,6 +226,7 @@ export interface ToolValue {
 	stages?: import("./background-runs.js").BackgroundStage[];
 	comments?: import("./background-runs.js").BackgroundComment[];
 	decisions?: import("./background-runs.js").BackgroundDecision[];
+	recentRuns?: import("./background-runs.js").BackgroundRunSummary[];
 	[key: string]: unknown;
 }
 export interface ToolOutput {
@@ -304,8 +316,8 @@ export interface HostServices {
 }
 export interface HostContext {
 	get<K extends keyof HostServices>(name: K): HostServices[K] | undefined;
-	fiber?: { entry?: object };
-	logger?: { warn?(message: string): void };
+	fiber?: { entry?: { options?: { config?: unknown } } & object };
+	logger?: { info?(message: string): void; warn?(message: string): void };
 	effect(callback: () => unknown, label?: string): unknown;
 	on?(name: "subagent/end", listener: (info: { id: string }) => void): Disposer;
 	on?(

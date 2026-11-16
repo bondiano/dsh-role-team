@@ -33,6 +33,16 @@ export interface BackgroundDecision {
 	note?: string;
 }
 
+export interface BackgroundRunSummary {
+	runId: string;
+	status: string;
+	task: string;
+	startedAt: number;
+	finishedAt?: number;
+	currentRole?: string | null;
+	phase?: string;
+}
+
 export interface BackgroundRunState {
 	tool?: string;
 	task?: string;
@@ -115,6 +125,13 @@ export function createBackgroundRuns<
 		},
 	) => Promise<Outcome>,
 	stateOf: (id: string) => State | undefined,
+	onComplete?: (info: {
+		runId: string;
+		owner: string;
+		status: string;
+		task: string;
+		report?: string;
+	}) => void,
 ) {
 	const jobs = new Map<string, BackgroundJob<State, Outcome>>();
 	let closed = false;
@@ -135,6 +152,18 @@ export function createBackgroundRuns<
 			throw new Error("No role-team run found in this session");
 		return job;
 	};
+	function summarize(job: BackgroundJob<State, Outcome>): BackgroundRunSummary {
+		const live = stateOf(job.id) ?? job.lastState;
+		return {
+			runId: job.id,
+			status: job.status,
+			task: job.task,
+			startedAt: job.startedAt,
+			...(job.finishedAt ? { finishedAt: job.finishedAt } : {}),
+			currentRole: live?.currentRole ?? null,
+			...(live?.phase ? { phase: live.phase } : {}),
+		};
+	}
 	function snapshot(job: BackgroundJob<State, Outcome>) {
 		const live = stateOf(job.id) ?? job.lastState;
 		const child = live?.child;
@@ -246,8 +275,27 @@ export function createBackgroundRuns<
 				})
 				.finally(() => {
 					job.finishedAt = Date.now();
+					try {
+						onComplete?.({
+							runId: job.id,
+							owner: job.owner,
+							status: job.status,
+							task: job.task,
+							report: job.outcome?.report ?? job.error,
+						});
+					} catch {
+						// Completion listeners must not fail background settlement.
+					}
 				});
 			return snapshot(job);
+		},
+		list(agent: Agent | undefined, limit = 10): BackgroundRunSummary[] {
+			const owner = ownerOf(agent);
+			return [...jobs.values()]
+				.filter((item) => item.owner === owner)
+				.reverse()
+				.slice(0, Math.max(1, limit))
+				.map(summarize);
 		},
 		async status(
 			agent: Agent | undefined,
@@ -303,6 +351,15 @@ export function createBackgroundRuns<
 		},
 		cancel(agent: Agent | undefined, id?: string) {
 			const job = find(agent, id);
+			if (active(job)) {
+				job.status = "cancelling";
+				job.controller.abort();
+			}
+			return snapshot(job);
+		},
+		cancelById(id: string) {
+			const job = jobs.get(id);
+			if (!job) return undefined;
 			if (active(job)) {
 				job.status = "cancelling";
 				job.controller.abort();
