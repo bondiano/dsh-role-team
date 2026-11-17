@@ -10,7 +10,7 @@ From the workstation repository root:
 
 ```sh
 npm ci --prefix extensions/dsh/dsh-role-team
-node extensions/dsh/dsh-role-team/docs/preview/capture.mjs
+node extensions/dsh/dsh-role-team/docs/preview/capture.ts
 ```
 
 The script uses the existing React 18 UMD files and DSH theme from
