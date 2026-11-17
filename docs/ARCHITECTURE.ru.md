@@ -1,6 +1,6 @@
 # Архитектура и конечные автоматы DSH Role Team
 
-`@local/dsh-role-team` координирует четыре независимые инженерные роли (**PLAN → WORKER → ADVISOR → REVIEWER**) внутри DeepSeek Harness (DSH). Кодовая база организована по слоистой архитектуре (по образцу `@local/dsh-cult-canvas`) с явными конечными автоматами на базе **XState v5**.
+`@local/dsh-role-team` координирует четыре независимые инженерные роли (**PLAN → WORKER → ADVISOR → REVIEWER**) внутри DeepSeek Harness (DSH). Кодовая база организована по слоистой архитектуре (по образцу `@local/dsh-buildboard`) с явными конечными автоматами на базе **XState v5**.
 
 ## Слоистая структура
 

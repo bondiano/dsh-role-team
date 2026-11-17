@@ -1,6 +1,6 @@
 # DSH Role Team Architecture & State Machines
 
-`@local/dsh-role-team` orchestrates four independent AI engineering roles (**PLAN → WORKER → ADVISOR → REVIEWER**) inside DeepSeek Harness (DSH). The codebase follows a clean layered architecture (matching `@local/dsh-cult-canvas`) with explicit finite state machines powered by **XState v5**.
+`@local/dsh-role-team` orchestrates four independent AI engineering roles (**PLAN → WORKER → ADVISOR → REVIEWER**) inside DeepSeek Harness (DSH). The codebase follows a clean layered architecture (matching `@local/dsh-buildboard`) with explicit finite state machines powered by **XState v5**.
 
 ## Layered Structure
 
