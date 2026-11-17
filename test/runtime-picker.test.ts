@@ -52,7 +52,18 @@ function find(
 	}
 }
 
-async function pickerHarness(route: PickerRoute, groups: PickerGroup[] = []) {
+type RuntimeCatalog = Record<
+	string,
+	{ models?: Array<{ id: string; name: string }>; error?: string }
+>;
+async function pickerHarness(
+	route: PickerRoute,
+	groups: PickerGroup[] = [],
+	runtimes: RuntimeCatalog = {},
+	fallbacks: PickerRoute[] = [],
+	mode: "route" | "fallback" = "route",
+	api: Record<string, unknown> = {},
+) {
 	let captured!: PickerModule;
 	let states: unknown[] = [];
 	let cursor = 0;
@@ -112,15 +123,17 @@ async function pickerHarness(route: PickerRoute, groups: PickerGroup[] = []) {
 	states = [
 		{
 			status: "ready",
-			snapshot: { roles: { worker: { route } } },
+			snapshot: { roles: { worker: { route, fallbacks } } },
 			catalog: { groups },
 		},
-		{ role: "worker" },
+		mode === "fallback"
+			? { role: "worker", fallback: true }
+			: { role: "worker" },
 		false,
 		undefined,
 		"",
 	];
-	const section = Section({ api: {}, t: (key: string) => key });
+	const section = Section({ api, t: (key: string) => key });
 	const element = find(
 		section,
 		(node) =>
@@ -131,15 +144,20 @@ async function pickerHarness(route: PickerRoute, groups: PickerGroup[] = []) {
 	cursor = 0;
 	const props = {
 		...element.props,
-		onApply: (value: PickerRoute) => {
-			saved = value;
-		},
+		runtimes,
+		...(mode === "route"
+			? {
+					onApply: (value: PickerRoute) => {
+						saved = value;
+					},
+				}
+			: {}),
 	};
 	const render = () => {
 		cursor = 0;
 		return (element.type as Component)(props);
 	};
-	return { render, saved: () => saved };
+	return { render, saved: () => saved, section };
 }
 
 test("runtime picker preserves external route on reopen and allows manual model entry without native providers", async () => {
@@ -201,4 +219,117 @@ test("native selection retains provider/model behavior and runtime can switch to
 	assert.equal(picker.saved()!.runtime, "cursor");
 	assert.equal(picker.saved()!.provider, "cursor");
 	assert.equal(picker.saved()!.model, "m");
+});
+
+test("external runtime catalog offers selectable models for the route", async () => {
+	const picker = await pickerHarness(
+		{ runtime: "droid", provider: "droid", model: "old-model" },
+		[],
+		{
+			droid: {
+				models: [
+					{ id: "auto", name: "Auto Model" },
+					{ id: "claude-opus-5-5", name: "Opus 5.5" },
+				],
+			},
+		},
+	);
+	let tree = picker.render();
+	const option = find(
+		tree,
+		(node) =>
+			node.type === "button" &&
+			node.children.some(
+				(child) =>
+					typeof child === "object" &&
+					child !== null &&
+					!Array.isArray(child) &&
+					"children" in child &&
+					Array.isArray(child.children) &&
+					child.children.includes("Opus 5.5"),
+			),
+	)!;
+	option.props.onClick!();
+	tree = picker.render();
+	find(
+		tree,
+		(node) => node.type === "button" && node.children.includes("apply"),
+	)!.props.onClick!();
+	assert.equal(picker.saved()!.runtime, "droid");
+	assert.equal(picker.saved()!.provider, "droid");
+	assert.equal(picker.saved()!.model, "claude-opus-5-5");
+});
+
+function stringsOf(tree: Tree): string[] {
+	if (typeof tree === "string") return [tree];
+	if (!tree || typeof tree !== "object") return [];
+	return (Array.isArray(tree) ? tree : (tree.children ?? [])).flatMap(
+		stringsOf,
+	);
+}
+
+test("role rows render the configured fallback chain", async () => {
+	const picker = await pickerHarness({ provider: "p", model: "m" }, [], {}, [
+		{ provider: "z", model: "g" },
+		{ runtime: "droid", provider: "droid", model: "auto" },
+	]);
+	const row = find(
+		picker.section,
+		(node) =>
+			typeof node.type === "function" &&
+			node.type.name === "RoleRow" &&
+			node.props.role === "worker",
+	)!;
+	const text = stringsOf((row.type as Component)(row.props));
+	assert.ok(
+		text.some((value) => value === "fallbacks: z/g -> droid:droid/auto"),
+		JSON.stringify(text),
+	);
+});
+
+test("fallback picker appends a runtime-catalog route to the chain", async () => {
+	const saves: Array<{ role: string; routes: PickerRoute[] }> = [];
+	const picker = await pickerHarness(
+		{ runtime: "droid", provider: "droid", model: "old-model" },
+		[],
+		{ droid: { models: [{ id: "auto", name: "Auto Model" }] } },
+		[{ provider: "z", model: "g" }],
+		"fallback",
+		{
+			async saveFallback(role: string, routes: PickerRoute[]) {
+				saves.push({ role, routes });
+				return { ok: true };
+			},
+		},
+	);
+	let tree = picker.render();
+	const option = find(
+		tree,
+		(node) =>
+			node.type === "button" &&
+			node.children.some(
+				(child) =>
+					typeof child === "object" &&
+					child !== null &&
+					!Array.isArray(child) &&
+					"children" in child &&
+					Array.isArray(child.children) &&
+					child.children.includes("Auto Model"),
+			),
+	)!;
+	option.props.onClick!();
+	tree = picker.render();
+	find(
+		tree,
+		(node) => node.type === "button" && node.children.includes("apply"),
+	)!.props.onClick!();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(saves.length, 1);
+	assert.equal(saves[0]!.role, "worker");
+	assert.equal(saves[0]!.routes.length, 2);
+	assert.equal(saves[0]!.routes[0]!.provider, "z");
+	assert.equal(saves[0]!.routes[0]!.model, "g");
+	assert.equal(saves[0]!.routes[1]!.runtime, "droid");
+	assert.equal(saves[0]!.routes[1]!.provider, "droid");
+	assert.equal(saves[0]!.routes[1]!.model, "auto");
 });

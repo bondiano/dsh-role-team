@@ -7,6 +7,7 @@ import {
 	cloneJson,
 	familyOf,
 	familyWarnings,
+	formatFallbackChain,
 	formatRoute,
 	isPlainObject,
 	isRole,
@@ -76,6 +77,53 @@ export async function saveRoleRoute(
 		}
 		if (Object.keys(roles).length === 0) Reflect.deleteProperty(next, "roles");
 		else next.roles = roles;
+		nextConfig = next;
+		return next;
+	});
+	updateConfigState(ctx, nextConfig);
+	return nextConfig;
+}
+
+/**
+ * Persist one role's ordered fallback chain. An empty array deletes the
+ * override so the role keeps no fallback routes.
+ */
+export async function saveRoleFallbacks(
+	ctx: HostContext,
+	role: Role,
+	routes: Route[],
+): Promise<unknown> {
+	const editor = ctx.get("configEditor");
+	if (editor === undefined || editor === null) {
+		throw new Error(
+			"the configuration editor is unavailable; edit the role-team row in the profile cordis.patch.yml instead",
+		);
+	}
+	const entry = ctx.fiber?.entry;
+	if (entry === undefined || entry === null) {
+		throw new Error(
+			"the role-team plugin is not mounted through the Loader; its configuration cannot be persisted",
+		);
+	}
+	let nextConfig;
+	await editor.edit(entry, (current) => {
+		const next = isPlainObject(current) ? cloneJson(current) : {};
+		const fallbacks = isPlainObject(next.fallbacks) ? next.fallbacks : {};
+		if (routes.length === 0) {
+			Reflect.deleteProperty(fallbacks, role);
+		} else {
+			fallbacks[role] = routes.map((route) => ({
+				provider: route.provider,
+				model: route.model,
+				...(route.runtime === undefined ? {} : { runtime: route.runtime }),
+				...(route.reasoningEffort === undefined
+					? {}
+					: { reasoningEffort: route.reasoningEffort }),
+			}));
+		}
+		if (Object.keys(fallbacks).length === 0)
+			Reflect.deleteProperty(next, "fallbacks");
+		else next.fallbacks = fallbacks;
 		nextConfig = next;
 		return next;
 	});
@@ -154,7 +202,10 @@ function roleTable(config: RoleTeamConfig): string {
 				: source === "inherit"
 					? " (inherited)"
 					: "";
+		const fallbacks = config.fallbacks[role] ?? [];
 		lines.push(`  ${role.padEnd(8)} ${label}${suffix}`);
+		if (fallbacks.length > 0)
+			lines.push(`           fallbacks: ${formatFallbackChain(fallbacks)}`);
 	}
 	lines.push(
 		`Settings: maxRounds=${config.maxRounds} · maxPlanPasses=${config.maxPlanPasses} · childMaxDepth=${config.childMaxDepth}`,
@@ -166,7 +217,7 @@ function roleTable(config: RoleTeamConfig): string {
 	}
 	lines.push("");
 	lines.push(
-		"Commands: /roles set <role> <provider>/<model>[:effort] · /roles inherit <role> · /roles reset <role> · /roles config [key] [value] · /roles models [provider] · /roles doctor · /roles run <task> · /roles status [run-id] · /roles list · /roles cancel [run-id] · /role-plan <task or plan.md>",
+		"Commands: /roles set <role> <provider>/<model>[:effort] · /roles fallback <role> [<provider>/<model> ... | clear] · /roles inherit <role> · /roles reset <role> · /roles config [key] [value] · /roles models [provider] · /roles doctor · /roles run <task> · /roles status [run-id] · /roles list · /roles cancel [run-id] · /role-plan <task or plan.md>",
 	);
 	return lines.join("\n");
 }
@@ -180,19 +231,40 @@ export async function doctorReport(
 	const lines = ["Role team doctor:"];
 	const checks = await Promise.all(
 		ROLE_NAMES.map(async (role) => {
+			const out: string[] = [];
 			const route = config.roles[role];
 			if (route === null) {
-				return `  ${role.padEnd(8)} inherit session model`;
+				out.push(`  ${role.padEnd(8)} inherit session model`);
+			} else {
+				try {
+					await validateRoute(ctx, role, route, signal);
+					out.push(
+						`  ${role.padEnd(8)} ok — ${formatRoute(route)} (${familyOf(route) ?? "unknown"} family; credentials are verified on the first run)`,
+					);
+				} catch (error) {
+					out.push(
+						`  ${role.padEnd(8)} FAILED — ${formatRoute(route)}: ${messageOf(error)}`,
+					);
+				}
 			}
-			try {
-				await validateRoute(ctx, role, route, signal);
-				return `  ${role.padEnd(8)} ok — ${formatRoute(route)} (${familyOf(route) ?? "unknown"} family; credentials are verified on the first run)`;
-			} catch (error) {
-				return `  ${role.padEnd(8)} FAILED — ${formatRoute(route)}: ${messageOf(error)}`;
+			const fallbacks = config.fallbacks[role] ?? [];
+			for (let index = 0; index < fallbacks.length; index += 1) {
+				const fallback = fallbacks[index]!;
+				try {
+					await validateRoute(ctx, role, fallback, signal);
+					out.push(
+						`  ${role.padEnd(8)} fallback ${index + 1} ok — ${formatRoute(fallback)}`,
+					);
+				} catch (error) {
+					out.push(
+						`  ${role.padEnd(8)} fallback ${index + 1} FAILED — ${formatRoute(fallback)}: ${messageOf(error)}`,
+					);
+				}
 			}
+			return out;
 		}),
 	);
-	lines.push(...checks);
+	lines.push(...checks.flat());
 	for (const problem of config.problems) {
 		lines.push(
 			`  ${problem.role.padEnd(8)} config problem: ${problem.message}`,
@@ -206,11 +278,38 @@ export async function doctorReport(
 	return lines.join("\n");
 }
 
-/** List registered providers and their advertised models in parallel. */
+/** List registered providers, agent runtimes and their advertised models. */
 async function modelsReport(
 	ctx: HostContext,
 	providerArg: string | undefined,
 ): Promise<string> {
+	const runtime = ctx.get("agentRuntime");
+	const runtimeIds = ["cursor", "droid"];
+	if (providerArg !== undefined && runtimeIds.includes(providerArg)) {
+		if (typeof runtime?.catalog !== "function")
+			throw new Error(
+				`runtime "${providerArg}" is unavailable or exposes no model catalog`,
+			);
+		let models;
+		try {
+			models = (await runtime.catalog(providerArg)).models;
+		} catch (error) {
+			throw new Error(
+				`runtime "${providerArg}" could not list models: ${messageOf(error)}`,
+			);
+		}
+		const lines = [`Models for ${providerArg} runtime:`];
+		for (const model of models)
+			lines.push(
+				`  ${model.id}${model.name === undefined || model.name === model.id ? "" : ` — ${model.name}`}`,
+			);
+		if (models.length === 0) lines.push("  (the runtime advertises no models)");
+		lines.push(
+			"",
+			`Use them as a route: /roles set <role> ${providerArg}:${models[0]?.id ?? "<model-id>"}`,
+		);
+		return clip(lines.join("\n"), LIMITS.reportChars);
+	}
 	const llm = ctx.get("llm");
 	if (llm === undefined || llm === null)
 		throw new Error("the LLM service is unavailable");
@@ -263,8 +362,23 @@ async function modelsReport(
 		);
 	}
 	if (providers.length === 0) lines.push("  (none)");
+	if (typeof runtime?.catalog === "function") {
+		lines.push("", "Agent runtimes:");
+		for (const id of runtimeIds) {
+			try {
+				const models = (await runtime.catalog(id)).models;
+				lines.push(
+					`  ${id} — ${models.length} models (use /roles models ${id})`,
+				);
+			} catch (error) {
+				lines.push(`  ${id} — unavailable: ${messageOf(error)}`);
+			}
+		}
+	}
 	lines.push("");
-	lines.push("Use /roles models <provider> to list model ids.");
+	lines.push(
+		"Use /roles models <provider|runtime> to list model ids; runtime routes use cursor:<model> or droid:<model>.",
+	);
 	return lines.join("\n");
 }
 
@@ -315,6 +429,49 @@ async function handleRolesCommand(
 			return {
 				kind: "success",
 				text: `Role ${role} now uses ${formatRoute(parsed.route)}. The route resolves; credentials are verified by the first role run. Applied and saved to the profile patch.`,
+			};
+		}
+		if (verb === "fallback") {
+			const [roleToken, ...routeTokens] = rest.split(/\s+/).filter(Boolean);
+			if (roleToken === undefined) {
+				throw new Error(
+					"usage: /roles fallback <plan|worker|advisor|reviewer> <provider>/<model>[:effort] [more...] | clear",
+				);
+			}
+			const role = roleToken.toLowerCase();
+			if (!isRole(role))
+				throw new Error(
+					`unknown role "${roleToken}"; choose one of ${ROLE_NAMES.join(", ")}`,
+				);
+			if (routeTokens.length === 0) {
+				return {
+					kind: "success",
+					text: `Role ${role} fallbacks: ${formatFallbackChain(config.fallbacks[role] ?? [])}. Usage: /roles fallback ${role} <provider>/<model>[:effort] [more...] | clear`,
+				};
+			}
+			if (
+				routeTokens.length === 1 &&
+				routeTokens[0]!.toLowerCase() === "clear"
+			) {
+				await saveRoleFallbacks(ctx, role, []);
+				return {
+					kind: "success",
+					text: `Role ${role} has no fallback routes. Applied and saved to the profile patch.`,
+				};
+			}
+			const routes: Route[] = [];
+			for (const token of routeTokens) {
+				const parsed = normalizeRoute(token);
+				if (parsed.error !== undefined || parsed.route === null)
+					throw new Error(parsed.error ?? `"${token}" is not a route`);
+				routes.push(parsed.route);
+			}
+			for (const route of routes)
+				await validateRoute(ctx, role, route, invocation.signal);
+			await saveRoleFallbacks(ctx, role, routes);
+			return {
+				kind: "success",
+				text: `Role ${role} fallbacks: ${formatFallbackChain(routes)}. Every route resolves; credentials are verified on use. Applied and saved to the profile patch.`,
 			};
 		}
 		if (verb === "inherit") {
@@ -443,7 +600,7 @@ async function handleRolesCommand(
 			};
 		}
 		throw new Error(
-			`unknown /roles subcommand "${verb}"; use set, inherit, reset, config, models, doctor, run, status, list or cancel`,
+			`unknown /roles subcommand "${verb}"; use set, fallback, inherit, reset, config, models, doctor, run, status, list or cancel`,
 		);
 	} catch (error) {
 		return { kind: "error", text: messageOf(error) };
@@ -481,7 +638,7 @@ export function registerRolesCommand(
 		description:
 			"Show or change the role team models, check role routes, or run the full role team.",
 		input: {
-			hint: "[set <role> <provider>/<model>[:effort] | inherit <role> | reset <role> | config [key] [value] | models [provider] | doctor | run <task> | status [run-id] | list | cancel [run-id]]",
+			hint: "[set <role> <provider>/<model>[:effort] | fallback <role> [<route> ... | clear] | inherit <role> | reset <role> | config [key] [value] | models [provider|runtime] | doctor | run <task> | status [run-id] | list | cancel [run-id]]",
 		},
 		handler: (invocation) =>
 			handleRolesCommand(ctx, config, invocation, background),

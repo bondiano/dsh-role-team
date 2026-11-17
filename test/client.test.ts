@@ -291,6 +291,10 @@ test("the client half registers settings and foreground/background role tool car
 	assert.equal(button[0]!, "button");
 	assert.ok(JSON.stringify(button).includes("approved"));
 	assert.ok(JSON.stringify(button).includes("Do it"));
+	assert.ok(
+		JSON.stringify(button).includes("opencode-go/glm-5.3"),
+		"the card header names the model of the newest stage",
+	);
 	const body = rendered[3]!;
 	const bodyText = JSON.stringify(body);
 	assert.ok(bodyText.includes("round 1 final gate"));

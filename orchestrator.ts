@@ -2,6 +2,7 @@ import {
 	clip,
 	familyOf,
 	formatDuration,
+	formatFallbackChain,
 	formatRoute,
 	LIMITS,
 	messageOf,
@@ -62,6 +63,8 @@ export interface RoleRunOptions {
 	signal?: AbortSignal;
 	cwd?: string;
 	callId?: string;
+	/** Run this concrete route instead of `config.roles[role]` (fallback execution). */
+	routeOverride?: Route | null;
 	onChild?: (child: ChildTarget | undefined) => void;
 }
 
@@ -89,12 +92,22 @@ interface ReportInputs {
 export async function runRole(
 	ctx: HostContext,
 	config: RoleTeamConfig,
-	{ role, prompt, parent, signal, cwd, callId, onChild }: RoleRunOptions,
+	{
+		role,
+		prompt,
+		parent,
+		signal,
+		cwd,
+		callId,
+		routeOverride,
+		onChild,
+	}: RoleRunOptions,
 ): Promise<RoleResult> {
 	const update = (patch: Parameters<typeof updateRunState>[2]) => {
 		updateRunState(ctx, callId, patch);
 	};
-	const selectedRoute = config.roles[role];
+	const selectedRoute =
+		routeOverride !== undefined ? routeOverride : config.roles[role];
 	if (selectedRoute?.runtime && selectedRoute.runtime !== "native") {
 		return runRuntimeRole(ctx, {
 			route: selectedRoute,
@@ -120,24 +133,23 @@ export async function runRole(
 	}
 	if (signal !== undefined && signal.aborted)
 		throw new Error("role team was cancelled");
-	const route = config.roles[role] ?? null;
 	const startedAt = Date.now();
 	const name = roleChildName(ctx, role);
 	const agentOptions =
-		route === null
+		selectedRoute === null
 			? undefined
 			: {
-					provider: route.provider,
-					model: route.model,
-					...(route.reasoningEffort === undefined
+					provider: selectedRoute.provider,
+					model: selectedRoute.model,
+					...(selectedRoute.reasoningEffort === undefined
 						? {}
-						: { reasoningEffort: route.reasoningEffort }),
+						: { reasoningEffort: selectedRoute.reasoningEffort }),
 				};
 	let started;
 	try {
 		started = await subagents.startActivation({
 			provider: "spawn",
-			label: `role ${role}`,
+			label: `role ${role}${selectedRoute === null ? "" : ` · ${formatRoute(selectedRoute)}`}`,
 			name,
 			parent,
 			signal,
@@ -156,7 +168,7 @@ export async function runRole(
 	}
 	update({
 		child: { id: started.childId, name: started.name },
-		progress: `${ROLE_LABELS[role]} started`,
+		progress: `${ROLE_LABELS[role]} started · ${formatRoute(selectedRoute)}`,
 	});
 	const childLifetime = new AbortController();
 	onChild?.({ id: started.childId, signal: childLifetime.signal });
@@ -209,7 +221,7 @@ export async function runRole(
 	}
 	return {
 		role,
-		route,
+		route: selectedRoute,
 		childName: started.name,
 		status: result.stopReason,
 		text: textOf(result.output),
@@ -217,6 +229,81 @@ export async function runRole(
 			typeof result.diagnostic === "string" ? result.diagnostic : undefined,
 		durationMs: Date.now() - startedAt,
 	};
+}
+
+/**
+ * Run one role against its primary route and then each configured fallback,
+ * skipping routes that fail validation or execution. The first success wins;
+ * every earlier failure is reported on the result.
+ */
+export async function runRoleWithFallback(
+	ctx: HostContext,
+	config: RoleTeamConfig,
+	options: RoleRunOptions,
+): Promise<RoleResult> {
+	const { role, signal } = options;
+	const candidates: (Route | null)[] = [
+		config.roles[role] ?? null,
+		...(config.fallbacks[role] ?? []),
+	];
+	const seen = new Set<string>();
+	const routes = candidates.filter((candidate) => {
+		if (candidate === null) return !seen.has("inherit") && seen.add("inherit");
+		const key = `${candidate.runtime ?? ""}|${candidate.provider}|${candidate.model}|${candidate.reasoningEffort ?? ""}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+	const attempts: { route: Route; error: string }[] = [];
+	let inheritError: string | undefined;
+	for (const candidate of routes) {
+		if (signal?.aborted) throw new Error("role team was cancelled");
+		if (candidate === null) {
+			try {
+				const result = await runRole(ctx, config, {
+					...options,
+					routeOverride: null,
+				});
+				return attempts.length === 0
+					? result
+					: { ...result, fallback: true, attempts };
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				inheritError = messageOf(error);
+				continue;
+			}
+		}
+		try {
+			await validateRoute(ctx, role, candidate, signal);
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			attempts.push({ route: candidate, error: messageOf(error) });
+			continue;
+		}
+		try {
+			const result = await runRole(ctx, config, {
+				...options,
+				routeOverride: candidate,
+			});
+			return attempts.length === 0
+				? result
+				: { ...result, fallback: true, attempts };
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			attempts.push({ route: candidate, error: messageOf(error) });
+		}
+	}
+	const failures = [
+		...(inheritError === undefined
+			? []
+			: [`inherit session model (${inheritError})`]),
+		...attempts.map(
+			(attempt) => `${formatRoute(attempt.route)} (${attempt.error})`,
+		),
+	];
+	throw new Error(
+		`every route for ${role} failed: ${failures.length === 0 ? "no route configured" : failures.join("; ")}`,
+	);
 }
 
 /** Run one role for a single-role tool while tracking it in the live run state. */
@@ -228,7 +315,7 @@ export async function runTrackedRole(
 	beginRunState(ctx, callId, tool, oneLine(task, 300));
 	beginRunStage(ctx, callId, role, config.roles[role] ?? null);
 	try {
-		const result = await runRole(ctx, config, {
+		const result = await runRoleWithFallback(ctx, config, {
 			role,
 			prompt,
 			parent: agent,
@@ -236,7 +323,14 @@ export async function runTrackedRole(
 			cwd,
 			callId,
 		});
-		endRunStage(ctx, callId, role, result.status, result.durationMs);
+		endRunStage(
+			ctx,
+			callId,
+			role,
+			result.status,
+			result.durationMs,
+			result.route,
+		);
 		return result;
 	} catch (error) {
 		endRunStage(ctx, callId, role, "failed", 0);
@@ -248,13 +342,20 @@ export async function runTrackedRole(
 
 /** Format one role result for a single-role tool. */
 export function formatRoleResult(result: RoleResult): string {
-	const header = `Role ${ROLE_LABELS[result.role]} (${formatRoute(result.route)}) finished: ${result.status} in ${formatDuration(result.durationMs)}.`;
+	const header = `Role ${ROLE_LABELS[result.role]} (${formatRoute(result.route)}${result.fallback ? ", fallback" : ""}) finished: ${result.status} in ${formatDuration(result.durationMs)}.`;
 	const body = result.text === "" ? "(the role returned no text)" : result.text;
+	const attempts =
+		result.attempts === undefined || result.attempts.length === 0
+			? ""
+			: `\nFailed routes: ${result.attempts.map((attempt) => `${formatRoute(attempt.route)} (${attempt.error})`).join("; ")}`;
 	const diagnostic =
 		result.diagnostic === undefined
 			? ""
 			: `\n\nDiagnostic: ${result.diagnostic}`;
-	return clip(`${header}\n\n${body}${diagnostic}`, LIMITS.roleOutputChars);
+	return clip(
+		`${header}${attempts}\n\n${body}${diagnostic}`,
+		LIMITS.roleOutputChars,
+	);
 }
 
 /** Build the structured canonical value of one single-role tool. */
@@ -268,6 +369,8 @@ export function structuredRoleResult(
 		route: result.route,
 		status: result.status,
 		durationMs: result.durationMs,
+		...(result.fallback === true ? { fallback: true } : {}),
+		...(result.attempts === undefined ? {} : { attempts: result.attempts }),
 		...(verdict === undefined ? {} : { verdict }),
 	};
 }
@@ -497,6 +600,12 @@ function buildTeamReport({
 	lines.push(
 		`Roles: ${ROLE_NAMES.map((role) => `${role}=${formatRoute(config.roles[role])}`).join(" · ")}`,
 	);
+	const chains = ROLE_NAMES.filter(
+		(role) => (config.fallbacks[role] ?? []).length > 0,
+	).map(
+		(role) => `${role}=${formatFallbackChain(config.fallbacks[role] ?? [])}`,
+	);
+	if (chains.length > 0) lines.push(`Fallbacks: ${chains.join(" · ")}`);
 	lines.push(`Task: ${oneLine(task, 300)}`);
 	if (rounds.some((round) => round.worker.cwd))
 		lines.push(
@@ -523,7 +632,7 @@ function buildTeamReport({
 		lines.push("");
 		lines.push(`ROUND ${round.number}`);
 		lines.push(
-			`WORKER (${formatRoute(round.worker.route)}, ${round.worker.status}, ${formatDuration(round.worker.durationMs)})`,
+			`WORKER (${formatRoute(round.worker.route)}${round.worker.fallback ? ", fallback" : ""}, ${round.worker.status}, ${formatDuration(round.worker.durationMs)})`,
 		);
 		if (round.worker.cwd)
 			lines.push(`Candidate workspace: ${round.worker.cwd}`);
@@ -539,7 +648,7 @@ function buildTeamReport({
 			lines.push(`Diagnostic: ${clip(round.worker.diagnostic, 1500)}`);
 		if (round.advisor !== undefined) {
 			lines.push(
-				`ADVISOR (${formatRoute(round.advisor.route)}, ${round.advisor.status}, ${formatDuration(round.advisor.durationMs)}) — ${round.advisorVerdict.approved ? "APPROVED" : "CHANGES REQUIRED"}`,
+				`ADVISOR (${formatRoute(round.advisor.route)}${round.advisor.fallback ? ", fallback" : ""}, ${round.advisor.status}, ${formatDuration(round.advisor.durationMs)}) — ${round.advisorVerdict.approved ? "APPROVED" : "CHANGES REQUIRED"}`,
 			);
 			if (round.advisor.diagnostic !== undefined)
 				lines.push(`Diagnostic: ${clip(round.advisor.diagnostic, 1500)}`);
@@ -548,7 +657,7 @@ function buildTeamReport({
 		}
 		if (round.reviewer !== undefined) {
 			lines.push(
-				`REVIEWER (${formatRoute(round.reviewer.route)}, ${round.reviewer.status}, ${formatDuration(round.reviewer.durationMs)}) — ${round.reviewerVerdict!.approved ? "APPROVED" : "CHANGES REQUIRED"}`,
+				`REVIEWER (${formatRoute(round.reviewer.route)}${round.reviewer.fallback ? ", fallback" : ""}, ${round.reviewer.status}, ${formatDuration(round.reviewer.durationMs)}) — ${round.reviewerVerdict!.approved ? "APPROVED" : "CHANGES REQUIRED"}`,
 			);
 			if (round.reviewer.diagnostic !== undefined)
 				lines.push(`Diagnostic: ${clip(round.reviewer.diagnostic, 1500)}`);
@@ -634,7 +743,12 @@ export async function runRoleTeam(
 			`role team configuration is invalid: ${configProblems.map((problem) => `${problem.role}: ${problem.message}`).join("; ")}`,
 		);
 	}
-	await validateRoutesParallel(ctx, usedRoles, config, signal);
+	await validateRoutesParallel(
+		ctx,
+		usedRoles.filter((role) => (config.fallbacks[role] ?? []).length === 0),
+		config,
+		signal,
+	);
 	// A local copy of the routes: a worker model chosen through the exhaustion
 	// question changes later attempts without mutating the plugin's config.
 	const runConfig = { ...config, roles: { ...config.roles } };
@@ -651,7 +765,7 @@ export async function runRoleTeam(
 	const stage = async (role: Role, prompt: string) => {
 		beginRunStage(ctx, callId, role, runConfig.roles[role] ?? null);
 		try {
-			const result = await runRole(ctx, runConfig, {
+			const result = await runRoleWithFallback(ctx, runConfig, {
 				role,
 				prompt,
 				parent: agent,
@@ -660,13 +774,22 @@ export async function runRoleTeam(
 				callId,
 				onChild,
 			});
+			if (result.fallback && result.route !== null)
+				runConfig.roles[role] = result.route;
 			stages.push({
 				role,
 				route: result.route,
 				status: result.status,
 				durationMs: result.durationMs,
 			});
-			endRunStage(ctx, callId, role, result.status, result.durationMs);
+			endRunStage(
+				ctx,
+				callId,
+				role,
+				result.status,
+				result.durationMs,
+				result.route,
+			);
 			return result;
 		} catch (error) {
 			endRunStage(ctx, callId, role, "failed", 0);

@@ -17,6 +17,7 @@ import {
 	handleRolePlanCommand,
 	registerRolePlanCommand,
 	registerRolesCommand,
+	saveRoleFallbacks,
 	saveRoleRoute,
 	saveTeamSettings,
 } from "./commands.js";
@@ -86,6 +87,7 @@ export {
 	roleTeamSnapshot,
 	runRoleTeam,
 	runStateOf,
+	saveRoleFallbacks,
 	saveRoleRoute,
 	saveTeamSettings,
 	structuredFamilyWarnings,

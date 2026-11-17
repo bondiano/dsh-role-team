@@ -173,6 +173,10 @@ export function createBackgroundRuns<
 		const stages = live?.stages ?? job.outcome?.stages ?? [];
 		const comments = job.outcome?.comments ?? live?.comments ?? [];
 		const latestComment = comments.at(-1);
+		const routeText = (route: RuntimeRoute | null | undefined) =>
+			route === null || route === undefined
+				? ""
+				: `${route.runtime && route.runtime !== "native" ? `${route.runtime}:` : ""}${route.provider}/${route.model}${route.reasoningEffort === undefined ? "" : ` @${route.reasoningEffort}`}`;
 		const route = stages.at(-1)?.route;
 		return {
 			...live,
@@ -195,11 +199,18 @@ export function createBackgroundRuns<
 					job.error ?? `Role team: ${job.status.toUpperCase()} · ${job.id}`,
 					`Task: ${job.task}`,
 					`Stage: ${live?.currentRole ?? live?.phase ?? (active(job) ? "preparing" : (stages.at(-1)?.role ?? job.status))}`,
-					...(route
-						? [
-								`Route: ${route.runtime ? `${route.runtime}:` : ""}${route.provider}/${route.model}`,
-							]
-						: []),
+					...(stages.length > 0
+						? stages
+								.filter(
+									(stage) => stage.route !== null && stage.route !== undefined,
+								)
+								.map(
+									(stage) =>
+										`Routes: ${stage.role} · ${routeText(stage.route)} · ${stage.roleStatus ?? stage.status}${stage.durationMs === undefined ? "" : ` · ${Math.round(stage.durationMs / 1000)}s`}`,
+								)
+						: route
+							? [`Routes: ${routeText(route)}`]
+							: []),
 					...(stages.length
 						? [
 								`Stages: ${stages.map((stage) => `${stage.role} (${stage.roleStatus ?? stage.status})`).join(" → ")}`,

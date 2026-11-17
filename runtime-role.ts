@@ -18,6 +18,10 @@ export type RuntimeEvent =
 
 export interface RuntimeService<Agent extends object = object> {
 	list(): Promise<{ runtimes: Array<{ id: string }> }>;
+	/** Optional model catalog for one runtime, used by the settings picker. */
+	catalog?(
+		runtime: string,
+	): Promise<{ models: Array<{ id: string; name?: string }> }>;
 	create(
 		options: RuntimeRoute & { cwd: string },
 		context: { parent: Agent; signal?: AbortSignal },
@@ -109,7 +113,7 @@ export async function runRuntimeRole<Agent extends object, Role extends string>(
 	);
 	onActivity?.({
 		child: { id: session.id, name: session.id, runtime: route.runtime },
-		progress: `${role.toUpperCase()} started`,
+		progress: `${role.toUpperCase()} started · ${route.runtime}:${route.provider}/${route.model}${route.reasoningEffort === undefined ? "" : ` @${route.reasoningEffort}`}`,
 	});
 	const isolatedPrompt = `Execution workspace: ${session.cwd}. Work exclusively in this isolated copy; do not edit the source workspace ${directory}.\n\n${prompt.replace(/^Workspace: .*$/m, `Workspace: ${session.cwd}`)}`;
 	let text = "";

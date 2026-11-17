@@ -194,6 +194,7 @@ export function endRunStage(
 	role: Role,
 	roleStatus: string,
 	durationMs: number,
+	route?: RoleTeamConfig["roles"][Role],
 ): void {
 	if (callId === undefined) return;
 	const runState = stateFor(ctx).runStates.get(callId);
@@ -205,6 +206,7 @@ export function endRunStage(
 		stage.status = "done";
 		stage.roleStatus = roleStatus;
 		stage.durationMs = durationMs;
+		if (route !== undefined) stage.route = route === null ? null : { ...route };
 	}
 	if (runState.currentRole === role) runState.currentRole = null;
 	delete runState.child;

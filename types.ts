@@ -23,6 +23,8 @@ export interface IndependenceWarning {
 }
 export interface RoleTeamConfig {
 	roles: Record<Role, Route | null>;
+	/** Ordered fallback routes tried when a role's primary route is unavailable or fails. */
+	fallbacks: Record<Role, Route[]>;
 	sources: Record<Role, "config" | "default" | "inherit">;
 	problems: { role: Role; message: string }[];
 	maxRounds: number;
@@ -47,6 +49,10 @@ export interface RoleResult {
 	status: string;
 	text: string;
 	diagnostic?: string;
+	/** True when a configured fallback route produced this result. */
+	fallback?: boolean;
+	/** Routes that failed before the one that produced this result. */
+	attempts?: { route: Route; error: string }[];
 	durationMs: number;
 	cwd?: string;
 	runtimeSessionId?: string;

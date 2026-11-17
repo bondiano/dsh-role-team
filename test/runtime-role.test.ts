@@ -190,3 +190,52 @@ test("external role ignores close errors in finally and aborts cleanly on signal
 		/role team was cancelled/,
 	);
 });
+
+test("runtime role reports the executed route and names it in activity", async () => {
+	const activity: Array<{ child?: { runtime?: string }; progress?: string }> =
+		[];
+	let created: RuntimeRoute | undefined;
+	const runtime: RuntimeService = {
+		async list() {
+			return { runtimes: [{ id: "cursor" }] };
+		},
+		async create(options) {
+			created = options;
+			return { id: "session-1", cwd: "/worktree" };
+		},
+		async *send() {
+			yield { type: "text", text: "done" };
+			yield { type: "settled", status: "completed" };
+		},
+		async close() {},
+	};
+	const ctx = {
+		get(name: string) {
+			return name === "agentRuntime"
+				? runtime
+				: { ensure: async () => "/source" };
+		},
+	} as unknown as RuntimeContext;
+	const result = await runRuntimeRole(ctx, {
+		route: {
+			runtime: "cursor",
+			provider: "cursor",
+			model: "claude-opus-5.5",
+			reasoningEffort: "high",
+		},
+		role: "worker",
+		prompt: "go",
+		parent: {},
+		onActivity: (next) => activity.push(next),
+	});
+	assert.equal(result.childName, "session-1");
+	assert.equal(result.route.runtime, "cursor");
+	assert.equal(result.route.model, "claude-opus-5.5");
+	assert.equal(created!.model, "claude-opus-5.5");
+	assert.equal(created!.reasoningEffort, "high");
+	assert.equal(activity[0]!.child!.runtime, "cursor");
+	assert.match(
+		activity[0]!.progress!,
+		/WORKER started · cursor:cursor\/claude-opus-5\.5 @high/,
+	);
+});

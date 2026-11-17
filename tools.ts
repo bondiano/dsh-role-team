@@ -218,6 +218,7 @@ export function buildTools(
 						route: round.worker.route,
 						status: round.worker.status,
 						durationMs: round.worker.durationMs,
+						...(round.worker.fallback === true ? { fallback: true } : {}),
 						...(round.worker.cwd
 							? {
 									cwd: round.worker.cwd,
@@ -234,6 +235,9 @@ export function buildTools(
 									route: round.advisor.route,
 									status: round.advisor.status,
 									durationMs: round.advisor.durationMs,
+									...(round.advisor.fallback === true
+										? { fallback: true }
+										: {}),
 								},
 							}),
 					...(round.reviewer === undefined
@@ -244,6 +248,9 @@ export function buildTools(
 									route: round.reviewer.route,
 									status: round.reviewer.status,
 									durationMs: round.reviewer.durationMs,
+									...(round.reviewer.fallback === true
+										? { fallback: true }
+										: {}),
 								},
 							}),
 				})),

@@ -1,5 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { saveRoleRoute, saveTeamSettings } from "./commands.js";
+import {
+	saveRoleFallbacks,
+	saveRoleRoute,
+	saveTeamSettings,
+} from "./commands.js";
 import {
 	cloneJson,
 	isPlainObject,
@@ -14,7 +18,7 @@ import {
 	validateRoute,
 } from "./config.js";
 import { claimPlanSession, runStateOf, stateFor } from "./state.js";
-import type { HostContext, Role } from "./types.js";
+import type { HostContext, Role, Route } from "./types.js";
 
 /** Report whether the browser half is present in the composed client graph. */
 function clientModuleStatus(ctx: HostContext) {
@@ -126,6 +130,43 @@ function effectiveRawConfig(ctx: HostContext, rawConfig?: unknown): unknown {
 }
 
 /**
+ * Collect Cursor and Droid model catalogs without failing the whole response
+ * when one runtime is unavailable.
+ */
+async function collectRuntimeModels(
+	ctx: HostContext,
+	only?: string,
+): Promise<
+	Record<
+		string,
+		{ models?: Array<{ id: string; name?: string }>; error?: string }
+	>
+> {
+	const service = ctx.get("agentRuntime");
+	const ids = only === undefined ? ["cursor", "droid"] : [only];
+	const result: Record<
+		string,
+		{ models?: Array<{ id: string; name?: string }>; error?: string }
+	> = {};
+	if (typeof service?.catalog !== "function") {
+		for (const id of ids)
+			result[id] = { error: "the agent runtime exposes no model catalog" };
+		return result;
+	}
+	await Promise.all(
+		ids.map(async (id) => {
+			try {
+				const catalog = await service.catalog!(id);
+				result[id] = { models: catalog.models };
+			} catch (error) {
+				result[id] = { error: messageOf(error) };
+			}
+		}),
+	);
+	return result;
+}
+
+/**
  * Serve GET and POST for the role settings page.
  */
 export async function handleRolesRoute(
@@ -139,8 +180,13 @@ export async function handleRolesRoute(
 	if (method === "GET") {
 		const effective = effectiveRawConfig(ctx, rawConfig);
 		let validateAll = false;
+		let includeModels = false;
+		let runtime: string | undefined;
 		try {
-			validateAll = new URL(request.url).searchParams.get("validate") === "1";
+			const url = new URL(request.url);
+			validateAll = url.searchParams.get("validate") === "1";
+			includeModels = url.searchParams.get("models") === "1";
+			runtime = url.searchParams.get("runtime") ?? undefined;
 		} catch {
 			validateAll = false;
 		}
@@ -153,6 +199,9 @@ export async function handleRolesRoute(
 		return roleRouteJson({
 			...roleTeamSnapshot(effective, validationErrors),
 			client: clientModuleStatus(ctx),
+			...(includeModels
+				? { runtimes: await collectRuntimeModels(ctx, runtime) }
+				: {}),
 		});
 	}
 	if (method === "HEAD")
@@ -198,6 +247,27 @@ export async function handleRolesRoute(
 			return roleRouteJson({ ok: false, error: "unknown role" }, 400);
 		if (body.action === "reset") {
 			const next = await saveRoleRoute(ctx, role, null, "reset");
+			return roleRouteJson(roleTeamSnapshot(next));
+		}
+		if (body.action === "fallback") {
+			const raw = body.routes;
+			const entries = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+			const routes: Route[] = [];
+			for (const entry of entries) {
+				const parsed = normalizeRoute(entry);
+				if (parsed.error !== undefined || parsed.route === null)
+					return roleRouteJson(
+						{
+							ok: false,
+							error: parsed.error ?? "every fallback needs a concrete route",
+						},
+						400,
+					);
+				routes.push(parsed.route);
+			}
+			for (const route of routes)
+				await validateRoute(ctx, role, route, request.signal);
+			const next = await saveRoleFallbacks(ctx, role, routes);
 			return roleRouteJson(roleTeamSnapshot(next));
 		}
 		if (

@@ -11,6 +11,7 @@ interface ClientRoute {
 }
 interface ClientRoleInfo {
 	route?: ClientRoute | null;
+	fallbacks?: ClientRoute[];
 	family?: string | null;
 	source?: string;
 	problem?: string;
@@ -38,6 +39,7 @@ interface ClientSnapshot {
 	ok?: boolean;
 	error?: string;
 	roles?: Partial<Record<ClientRole, ClientRoleInfo>>;
+	runtimes?: Record<string, { models?: ClientModel[]; error?: string }>;
 	warnings?: string[];
 	warningItems?: ClientWarningItem[];
 	maxRounds?: number;
@@ -47,6 +49,10 @@ interface ClientSnapshot {
 interface ClientApi {
 	load(validate?: boolean): Promise<ClientSnapshot>;
 	save(role: ClientRole, route: ClientRoute): Promise<ClientSnapshot>;
+	saveFallback(
+		role: ClientRole,
+		routes: ClientRoute[],
+	): Promise<ClientSnapshot>;
 	inherit?(role: ClientRole): Promise<ClientSnapshot>;
 	reset(role: ClientRole): Promise<ClientSnapshot>;
 	saveConfig?(patch: {
@@ -54,6 +60,9 @@ interface ClientApi {
 		maxPlanPasses?: number;
 		childMaxDepth?: number;
 	}): Promise<ClientSnapshot>;
+	runtimeModels(
+		runtime: string,
+	): Promise<{ models?: ClientModel[]; error?: string }>;
 	catalog(): Promise<ClientCatalog>;
 	onCatalogChange(listener: () => void): () => void;
 }
@@ -68,11 +77,22 @@ interface ClientRowProps {
 	t: ClientTranslator;
 	busy: boolean;
 	onEdit: (role: ClientRole) => void;
+	onFallback: (role: ClientRole) => void;
 	onReset: (role: ClientRole) => void;
 }
-interface ClientPickerProps extends Omit<ClientRowProps, "onEdit" | "onReset"> {
+interface ClientPickerProps {
+	role: ClientRole;
+	info?: ClientRoleInfo;
+	catalog?: ClientCatalog | null;
+	t: ClientTranslator;
+	busy: boolean;
 	error?: string;
+	fallback?: boolean;
+	runtimes?: Record<string, { models?: ClientModel[]; error?: string }>;
+	onRuntime?: (runtime: string) => void;
 	onApply: (route: ClientRoute) => void;
+	onRemoveFallback?: (index: number) => void;
+	onClearFallbacks?: () => void;
 	onInherit?: () => void;
 	onCancel: () => void;
 }
@@ -169,6 +189,10 @@ interface Window {
 			advisor: "#3fa46a",
 			reviewer: "#7b62c9",
 		};
+		/** One route in the compact form the settings rows use. */
+		function routeText(route: ClientRoute): string {
+			return `${route.runtime && route.runtime !== "native" ? `${route.runtime}:` : ""}${route.provider}/${route.model}${route.reasoningEffort === undefined ? "" : ` @${route.reasoningEffort}`}`;
+		}
 		const FAMILY_LABEL: Record<string, string> = {
 			openai: "OpenAI",
 			anthropic: "Anthropic",
@@ -201,6 +225,14 @@ interface Window {
 			inherit: "Inherits the session model",
 			useInherit: "Inherit session model",
 			unavailable: "not currently available",
+			fallbacks: "Fallbacks",
+			noFallbacks: "No fallbacks",
+			editFallbacks: "Fallbacks",
+			chooseFallbackTitle: "Add a fallback for {role}",
+			remove: "Remove",
+			clearFallbacks: "Clear fallbacks",
+			runtimeModels: "Runtime models",
+			runtimeModelsError: "Runtime models are unavailable.",
 			chooseTitle: "Choose the model for {role}",
 			search: "Search models",
 			providers: "Providers",
@@ -283,6 +315,14 @@ interface Window {
 			inherit: "Наследует модель сессии",
 			useInherit: "Наследовать модель сессии",
 			unavailable: "сейчас недоступна",
+			fallbacks: "Фолбеки",
+			noFallbacks: "Без фолбеков",
+			editFallbacks: "Фолбеки",
+			chooseFallbackTitle: "Добавить фолбек для {role}",
+			remove: "Убрать",
+			clearFallbacks: "Очистить фолбеки",
+			runtimeModels: "Модели рантайма",
+			runtimeModelsError: "Модели рантайма недоступны.",
 			chooseTitle: "Выберите модель для {role}",
 			search: "Поиск моделей",
 			providers: "Провайдеры",
@@ -364,6 +404,14 @@ interface Window {
 			inherit: "继承会话模型",
 			useInherit: "继承会话模型",
 			unavailable: "当前不可用",
+			fallbacks: "备用模型",
+			noFallbacks: "无备用模型",
+			editFallbacks: "备用模型",
+			chooseFallbackTitle: "为 {role} 添加备用模型",
+			remove: "移除",
+			clearFallbacks: "清空备用模型",
+			runtimeModels: "运行时模型",
+			runtimeModelsError: "运行时模型不可用。",
 			chooseTitle: "为 {role} 选择模型",
 			search: "搜索模型",
 			providers: "提供商",
@@ -567,6 +615,8 @@ interface Window {
 .dsh-rt-model-name { display: block; font-size: 13px; line-height: 20px; }
 .dsh-rt-model-id { display: block; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .dsh-rt-efforts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 8px; border-top: 0.5px solid var(--dsw-alias-border-l3); }
+.dsh-rt-fallbacks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 0.5px solid var(--dsw-alias-border-l3); }
+.dsh-rt-fallback-row { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: var(--dsw-radius-m, 6px); }
 .dsh-rt-effort-label { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); margin-right: 2px; }
 .dsh-rt-effort {
   box-sizing: border-box; height: 26px; padding: 0 9px; border: 0.5px solid var(--dsw-alias-border-l3);
@@ -602,6 +652,7 @@ interface Window {
 .dsh-rt-tool-head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--dsw-alias-brand-primary); }
 .dsh-rt-tool-dots { display: inline-flex; align-items: center; gap: 3px; flex: none; }
 .dsh-rt-tool-title { font-size: 12px; line-height: 18px; font-weight: 600; letter-spacing: .04em; white-space: nowrap; }
+.dsh-rt-tool-route { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .dsh-rt-chevron {
   flex: none; margin-left: auto; font-size: 10px; line-height: 14px;
   color: var(--dsw-alias-label-tertiary); transition: transform .15s ease;
@@ -728,10 +779,20 @@ interface Window {
 					request("GET", undefined, validate ? "?validate=1" : ""),
 				save: (role: ClientRole, route: ClientRoute) =>
 					request("POST", { role, route }),
+				saveFallback: (role: ClientRole, routes: ClientRoute[]) =>
+					request("POST", { role, action: "fallback", routes }),
 				inherit: (role: ClientRole) =>
 					request("POST", { role, action: "inherit" }),
 				reset: (role: ClientRole) => request("POST", { role, action: "reset" }),
 				saveConfig: (patch) => request("POST", { action: "config", ...patch }),
+				async runtimeModels(runtime: string) {
+					const snapshot = await request(
+						"GET",
+						undefined,
+						`?models=1&runtime=${encodeURIComponent(runtime)}`,
+					);
+					return snapshot.runtimes?.[runtime] ?? {};
+				},
 				async catalog() {
 					const response = await ctx.remote.session.modelCatalog();
 					if (!response.ok) throw new Error("model catalog is unavailable");
@@ -836,6 +897,7 @@ interface Window {
 			t,
 			busy,
 			onEdit,
+			onFallback,
 			onReset,
 		}: ClientRowProps) {
 			const route = info?.route ?? null;
@@ -892,6 +954,13 @@ interface Window {
 								{ className: "dsh-rt-route" },
 								`${route.runtime && route.runtime !== "native" ? `${route.runtime} · ` : ""}${group?.name ?? route.provider} / ${route.model}${route.reasoningEffort === undefined ? "" : ` · ${route.reasoningEffort}`}`,
 							),
+					info?.fallbacks !== undefined && info.fallbacks.length > 0
+						? h(
+								"span",
+								{ className: "dsh-rt-route" },
+								`${t("fallbacks")}: ${info.fallbacks.map(routeText).join(" -> ")}`,
+							)
+						: null,
 					!available && route !== null
 						? h(
 								"span",
@@ -924,6 +993,16 @@ interface Window {
 						},
 						t("change"),
 					),
+					h(
+						"button",
+						{
+							type: "button",
+							className: "dsh-rt-btn dsh-rt-btn-quiet",
+							disabled: busy,
+							onClick: () => onFallback(role),
+						},
+						t("editFallbacks"),
+					),
 					info?.source === "default"
 						? null
 						: h(
@@ -948,12 +1027,19 @@ interface Window {
 			t,
 			busy,
 			error,
+			fallback = false,
+			runtimes,
+			onRuntime,
 			onApply,
+			onRemoveFallback,
+			onClearFallbacks,
 			onInherit,
 			onCancel,
 		}: ClientPickerProps) {
 			const groups = catalog?.groups ?? [];
-			const current = info?.route ?? null;
+			const current = fallback
+				? (info?.route ?? (info?.fallbacks ?? []).at(-1) ?? null)
+				: (info?.route ?? null);
 			const currentGroup =
 				current === null ? undefined : groupOf(catalog, current.provider);
 			const currentModel = modelOf(catalog, current);
@@ -962,6 +1048,8 @@ interface Window {
 				current?.runtime ?? "native",
 			);
 			const external = runtime !== "native";
+			const externalCatalog = runtimes?.[runtime];
+			const externalModels = externalCatalog?.models ?? [];
 			const [provider, setProvider] = React.useState(initialProvider);
 			const [model, setModel] = React.useState(
 				current !== null &&
@@ -984,9 +1072,11 @@ interface Window {
 			const selected = group?.models?.find(
 				(candidate) => candidate.id === model,
 			);
-			const efforts = selected?.reasoning?.efforts ?? [];
+			const efforts = external ? [] : (selected?.reasoning?.efforts ?? []);
 			const needle = query.trim().toLowerCase();
-			const visible = (group?.models ?? []).filter(
+			const visible = (
+				external ? externalModels : (group?.models ?? [])
+			).filter(
 				(candidate) =>
 					needle === "" ||
 					candidate.name.toLowerCase().includes(needle) ||
@@ -994,6 +1084,9 @@ interface Window {
 			);
 			const canApply =
 				(external || provider !== "") && model.trim() !== "" && !busy;
+			React.useEffect(() => {
+				if (external) onRuntime?.(runtime);
+			}, [external, runtime, onRuntime]);
 
 			const dialogRef = React.useRef<HTMLDialogElement | null>(null);
 			React.useEffect(() => {
@@ -1057,7 +1150,9 @@ interface Window {
 					h(
 						"h3",
 						{ className: "dsh-rt-dialog-title", id: "dsh-rt-dialog-title" },
-						fill(t("chooseTitle"), { role: ROLE_LABEL[role] ?? role }),
+						fill(t(fallback ? "chooseFallbackTitle" : "chooseTitle"), {
+							role: ROLE_LABEL[role] ?? role,
+						}),
 					),
 					h(
 						"button",
@@ -1101,30 +1196,77 @@ interface Window {
 				h(
 					"div",
 					{ className: "dsh-rt-dialog-body" },
-					h(
-						"div",
-						{
-							className: "dsh-rt-providers",
-							role: "group",
-							"aria-label": t("providers"),
-						},
-						groups.length === 0
-							? h("p", { className: "dsh-rt-note" }, t("noProviders"))
-							: groups.map((candidate) =>
-									h(
-										"button",
-										{
-											key: candidate.id,
-											type: "button",
-											className: "dsh-rt-provider",
-											"aria-pressed": candidate.id === provider,
-											disabled: busy,
-											onClick: () => chooseProvider(candidate.id),
-										},
-										candidate.name,
-									),
-								),
-					),
+					fallback
+						? h(
+								"div",
+								{ className: "dsh-rt-fallbacks" },
+								h("span", { className: "dsh-rt-effort-label" }, t("fallbacks")),
+								(info?.fallbacks ?? []).length === 0
+									? h("span", { className: "dsh-rt-note" }, t("noFallbacks"))
+									: (info?.fallbacks ?? []).map((route, index) =>
+											h(
+												"span",
+												{
+													key: `${routeText(route)}-${index}`,
+													className: "dsh-rt-fallback-row",
+												},
+												h(
+													"span",
+													{ className: "dsh-rt-route" },
+													routeText(route),
+												),
+												h(
+													"button",
+													{
+														type: "button",
+														className: "dsh-rt-btn dsh-rt-btn-quiet",
+														disabled: busy,
+														onClick: () => onRemoveFallback?.(index),
+													},
+													t("remove"),
+												),
+											),
+										),
+								(info?.fallbacks ?? []).length > 0
+									? h(
+											"button",
+											{
+												type: "button",
+												className: "dsh-rt-btn dsh-rt-btn-quiet",
+												disabled: busy,
+												onClick: () => onClearFallbacks?.(),
+											},
+											t("clearFallbacks"),
+										)
+									: null,
+							)
+						: null,
+					external
+						? null
+						: h(
+								"div",
+								{
+									className: "dsh-rt-providers",
+									role: "group",
+									"aria-label": t("providers"),
+								},
+								groups.length === 0
+									? h("p", { className: "dsh-rt-note" }, t("noProviders"))
+									: groups.map((candidate) =>
+											h(
+												"button",
+												{
+													key: candidate.id,
+													type: "button",
+													className: "dsh-rt-provider",
+													"aria-pressed": candidate.id === provider,
+													disabled: busy,
+													onClick: () => chooseProvider(candidate.id),
+												},
+												candidate.name,
+											),
+										),
+							),
 					h(
 						"div",
 						{ className: "dsh-rt-models" },
@@ -1155,8 +1297,17 @@ interface Window {
 											id: "dsh-rt-runtime-model-hint",
 											className: "dsh-rt-note",
 										},
-										t("externalModelHint"),
+										externalModels.length > 0
+											? t("runtimeModels")
+											: t("externalModelHint"),
 									),
+									externalCatalog?.error === undefined
+										? null
+										: h(
+												"span",
+												{ className: "dsh-rt-warn" },
+												`${t("runtimeModelsError")} ${externalCatalog.error}`,
+											),
 								)
 							: null,
 						h("input", {
@@ -1166,7 +1317,7 @@ interface Window {
 							placeholder: t("search"),
 							"aria-label": t("search"),
 							value: query,
-							disabled: busy || groups.length === 0,
+							disabled: busy || (external ? false : groups.length === 0),
 							onChange: (
 								event: import("react").ChangeEvent<
 									HTMLInputElement | HTMLSelectElement
@@ -1306,16 +1457,42 @@ interface Window {
 				catalog: ClientCatalog | null;
 				error: string | null;
 			}>({ status: "loading", snapshot: null, catalog: null, error: null });
-			const [editing, setEditing] = React.useState<{ role: ClientRole } | null>(
-				null,
-			);
+			const [editing, setEditing] = React.useState<{
+				role: ClientRole;
+				fallback?: boolean;
+			} | null>(null);
 			const [saving, setSaving] = React.useState(false);
+			const [runtimes, setRuntimes] = React.useState<
+				Record<string, { models?: ClientModel[]; error?: string }>
+			>({});
 			const [saveError, setSaveError] = React.useState<string | undefined>(
 				undefined,
 			);
 			const [notice, setNotice] = React.useState("");
 			const alive = React.useRef(true);
 			const loading = React.useRef(false);
+			const loadingRuntimes = React.useRef(new Set<string>());
+
+			const loadRuntime = React.useCallback(
+				async (runtime: string) => {
+					if (loadingRuntimes.current.has(runtime)) return;
+					loadingRuntimes.current.add(runtime);
+					try {
+						const result = await api.runtimeModels(runtime);
+						if (!alive.current) return;
+						setRuntimes((previous) => ({ ...previous, [runtime]: result }));
+					} catch (error) {
+						if (!alive.current) return;
+						setRuntimes((previous) => ({
+							...previous,
+							[runtime]: { error: messageOf(error) },
+						}));
+					} finally {
+						loadingRuntimes.current.delete(runtime);
+					}
+				},
+				[api],
+			);
 
 			const load = React.useCallback(
 				async (validate = false) => {
@@ -1379,8 +1556,39 @@ interface Window {
 				setSaveError(undefined);
 			};
 
+			const updateFallbacks = async (
+				role: ClientRole,
+				routes: ClientRoute[],
+				close = false,
+			) => {
+				setSaving(true);
+				setSaveError(undefined);
+				try {
+					const snapshot = await api.saveFallback(role, routes);
+					if (!alive.current) return;
+					setState((previous) => ({ ...previous, snapshot, status: "ready" }));
+					if (close) setEditing(null);
+					setNotice(t("saved"));
+				} catch (error) {
+					setSaveError(messageOf(error));
+				} finally {
+					setSaving(false);
+				}
+			};
+
 			const applyRoute = async (route: ClientRoute) => {
 				if (editing === null) return;
+				if (editing.fallback) {
+					await updateFallbacks(
+						editing.role,
+						[
+							...(state.snapshot?.roles?.[editing.role]?.fallbacks ?? []),
+							route,
+						],
+						true,
+					);
+					return;
+				}
 				setSaving(true);
 				setSaveError(undefined);
 				try {
@@ -1496,6 +1704,10 @@ interface Window {
 												busy: saving,
 												onEdit: (selected) => {
 													setEditing({ role: selected });
+													setSaveError(undefined);
+												},
+												onFallback: (selected) => {
+													setEditing({ role: selected, fallback: true });
 													setSaveError(undefined);
 												},
 												onReset: (roleName) => {
@@ -1652,15 +1864,34 @@ interface Window {
 							t,
 							busy: saving,
 							error: saveError,
+							fallback: editing.fallback === true,
+							runtimes,
+							onRuntime: (runtime) => {
+								void loadRuntime(runtime);
+							},
 							onApply: (route) => {
 								void applyRoute(route);
 							},
+							onRemoveFallback: (index) => {
+								if (editing === null) return;
+								const chain = snapshot?.roles?.[editing.role]?.fallbacks ?? [];
+								void updateFallbacks(
+									editing.role,
+									chain.filter((_route, position) => position !== index),
+								);
+							},
+							onClearFallbacks: () => {
+								if (editing === null) return;
+								void updateFallbacks(editing.role, []);
+							},
 							onInherit:
-								typeof api.inherit === "function"
-									? () => {
-											void applyInherit();
-										}
-									: undefined,
+								editing.fallback === true
+									? undefined
+									: typeof api.inherit === "function"
+										? () => {
+												void applyInherit();
+											}
+										: undefined,
 							onCancel: closePicker,
 						}),
 			);
@@ -1959,6 +2190,14 @@ interface Window {
 				route == null || !isItem(route)
 					? t("inheritRoute")
 					: `${route.runtime && route.runtime !== "native" ? `${stringValue(route.runtime)}:` : ""}${stringValue(route.provider)}/${stringValue(route.model)}${route.reasoningEffort === undefined ? "" : ` @${stringValue(route.reasoningEffort)}`}`;
+			// The running stage wins; otherwise the newest finished stage names the
+			// model that produced the visible result.
+			const headerStage =
+				stages.find((stage) => stage.status === "running") ?? stages.at(-1);
+			const headerRoute =
+				headerStage !== undefined && isItem(headerStage.route)
+					? routeText(headerStage.route)
+					: "";
 
 			const severityText = (severity: unknown) => {
 				const key = SEVERITY_KEYS[stringValue(severity ?? "").toLowerCase()];
@@ -2261,6 +2500,13 @@ interface Window {
 						),
 					),
 					h("span", { className: "dsh-rt-tool-title" }, title),
+					headerRoute === ""
+						? null
+						: h(
+								"span",
+								{ className: "dsh-rt-tool-route", title: headerRoute },
+								headerRoute,
+							),
 					h(
 						"span",
 						{ className: pillClass, "aria-live": "polite" },

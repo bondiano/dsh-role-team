@@ -62,13 +62,19 @@ Chat commands:
 - `/roles` — show the routes, loop limits and their sources.
 - `/roles set <role> <provider>/<model>[:effort] | inherit` — validate the route against
   the live LLM runtime (or set `inherit`), then persist it in the profile patch.
+  Runtime routes use `cursor:<model>` or `droid:<model>`.
+- `/roles fallback <role> <route> [<route> ...] | clear` — replace a role's ordered
+  fallback chain. Each route is validated first; the role tries its primary route,
+  then each fallback when validation or execution fails. The settings page edits the
+  same chain.
 - `/roles inherit <role>` — configure the role to inherit the caller's session model.
 - `/roles reset <role>` — remove a saved override and fall back to the
   recommended default (or the inherited session model).
 - `/roles config [maxRounds|maxPlanPasses|childMaxDepth] [value]` — inspect or persist
   the loop limits (`maxRounds` 1–6, `maxPlanPasses` 1–3, `childMaxDepth` 0–8).
-- `/roles models [provider]` — list registered providers and their advertised
-  models, so the route ids are discoverable.
+- `/roles models [provider|runtime]` — list registered LLM providers, their advertised
+  models, and the Cursor/Factory Droid runtime catalogs, so primary and fallback route
+  ids are discoverable.
 - `/roles doctor` — validate every route in parallel and warn when the worker, advisor and
   reviewer are not from independent model families.
 - `/roles run <task>` — start the full team in the background.
@@ -162,6 +168,11 @@ a provider is not configured. The plugin also accepts `roles` in
     childMaxDepth: 2 # delegation depth available to role children
     prompts: # optional extra instructions per role
       worker: "Prefer the repository conventions over new abstractions."
+    fallbacks: # ordered alternatives when a route is unavailable or fails
+      worker:
+        - { provider: zai, model: glm-5.3 }
+        - "cursor:claude-opus-5.5"
+      advisor: "droid:gpt-6.1-sol"
 ```
 
 Compact `provider/model[:effort]` strings work too. Routes are validated with
@@ -170,17 +181,26 @@ effort fails with the role name and route instead of starting a child. Route
 validation does not test credentials: a provider that is registered but not
 signed in fails on the first role request with its own diagnostic.
 
+A fallback chain is tried in order: the primary route first, then each
+configured fallback after a validation or execution failure. The route that
+actually ran is sticky for later rounds and is named in the stage status, the
+final report (`..., fallback`), and the subagent's title (`role advisor ·
+opencode-go/glm-5.3`), so a finished task always shows which model did it.
+`/roles doctor` validates fallback routes too.
+
 ## Settings → Models
 
 The package ships a browser half, so **Settings → Models** gains a **Role team**
 section below the provider cards:
 
 - one row per role with the model name, the exact `provider/model` route, the
-  reasoning effort, and a **Recommended / Custom / Inherits the session model**
-  badge;
+  reasoning effort, the fallback chain, and a **Recommended / Custom / Inherits
+  the session model** badge;
 - **Change** opens a picker over the live adapter catalogue: provider list,
   model search, the model's reasoning efforts (with **Default** meaning no
   explicit effort), and an **Inherit session model** button;
+- **Fallbacks** opens the same picker in chain mode: applying appends a route to
+  the ordered chain, and each entry can be removed or cleared;
 - **Reset** removes a saved route and returns the role to the recommended
   default;
 - **Loop limits** lets you adjust `maxRounds` (1–6), `maxPlanPasses` (1–3), and
@@ -190,10 +210,11 @@ section below the provider cards:
   advertises as not currently available.
 
 The picker also supports **Cursor** and **Factory Droid** when the matching
-`agentRuntime` is installed in the profile. Enter the runtime's model ID
-directly; the DSH catalogue provides suggestions. External roles execute in an
-isolated copy and report its path and artifacts. Their changes are not applied
-to the source workspace automatically.
+`agentRuntime` is installed in the profile. Their runtime catalogs are loaded on
+demand and shown as a searchable model list; a free-text model ID remains
+available for a new or unlisted model. Runtime routes execute in an isolated
+copy and report its path and artifacts. Their changes are not applied to the
+source workspace automatically.
 
 Changes save immediately through the same profile configuration editor as
 `/roles set`, so the chat command and the page stay one source of truth. The

@@ -79,6 +79,7 @@ interface HarnessOptions {
 	askUser?: HostServices["userQuestions"]["ask"];
 	sendMessage?: Subagents["sendMessage"];
 	cwd?: string;
+	agentRuntime?: HostServices["agentRuntime"];
 	sessionController?: false;
 	workspace?: false | { attachSession?(id: string): Promise<unknown> };
 	createError?: unknown;
@@ -139,9 +140,7 @@ function makeHarness(options: HarnessOptions = {}) {
 					: undefined;
 			},
 			async startActivation(request) {
-				const role = request.label.startsWith("role ")
-					? request.label.slice(5)
-					: "unknown";
+				const role = /^role (\w+)/.exec(request.label)?.[1] ?? "unknown";
 				const prompt = request.prompt?.[0]?.text ?? "";
 				calls.push({
 					role,
@@ -232,6 +231,7 @@ function makeHarness(options: HarnessOptions = {}) {
 		};
 	}
 	if (options.askUser) services.userQuestions = { ask: options.askUser };
+	if (options.agentRuntime) services.agentRuntime = options.agentRuntime;
 	if (options.sessionController !== false) {
 		services.sessionController = {
 			async create(request) {
@@ -335,6 +335,34 @@ function makeHarness(options: HarnessOptions = {}) {
 function verdict(approved: boolean, issues: Issue[] = [], summary = "") {
 	return JSON.stringify({ approved, summary, issues });
 }
+
+test("resolveRoleTeamConfig parses ordered fallbacks and compact runtime routes", () => {
+	const config = resolveRoleTeamConfig({
+		fallbacks: {
+			worker: ["zai/glm-5.3:high", "cursor:claude-opus-5.5"],
+			advisor: { provider: "droid", model: "gpt-6.1-sol" },
+			reviewer: "not-a-route",
+		},
+	});
+	assert.deepEqual(config.fallbacks.worker, [
+		{ provider: "zai", model: "glm-5.3", reasoningEffort: "high" },
+		{ provider: "cursor", model: "claude-opus-5.5", runtime: "cursor" },
+	]);
+	assert.deepEqual(config.fallbacks.advisor, [
+		{ provider: "droid", model: "gpt-6.1-sol" },
+	]);
+	assert.equal(config.fallbacks.reviewer.length, 0);
+	assert.equal(config.problems.length, 1);
+	assert.equal(config.problems[0]!.role, "reviewer");
+	assert.match(config.problems[0]!.message, /^fallback: /);
+	assert.deepEqual(
+		roleTeamSnapshot({
+			fallbacks: { plan: ["zai/glm-5.3"] },
+		}).roles.plan.fallbacks,
+		[{ provider: "zai", model: "glm-5.3" }],
+	);
+	assert.deepEqual(resolveRoleTeamConfig({}).fallbacks.worker, []);
+});
 
 test("resolveRoleTeamConfig applies defaults, overrides and inheritance", () => {
 	const defaults = resolveRoleTeamConfig({});
@@ -822,6 +850,116 @@ test("the settings route serves GET, requires the mutation header, and persists 
 	assert.equal(reset.status, 200);
 	const resetSnapshot = await reset.json();
 	assert.equal(resetSnapshot.roles.worker.source, "default");
+});
+
+test("a role falls back to the next configured route and reports it", async () => {
+	const harness = makeHarness({
+		config: {
+			roles: {
+				worker: "broken/model",
+				advisor: "opencode-go/glm-5.3",
+				reviewer: "opencode-go/qwen3.8-max",
+			},
+			fallbacks: { worker: ["zai/glm-5.3:high"] },
+		},
+		responses: {
+			advisor: [
+				verdict(true, [], "plan approved"),
+				verdict(true, [], "work approved"),
+			],
+			reviewer: [verdict(true, [], "approved")],
+		},
+		llm: {
+			async resolveCallConfig(route: Route) {
+				if (route.provider === "broken") throw new Error("no such provider");
+				return {};
+			},
+			listProviders: () => [],
+			async listModels() {
+				return [];
+			},
+		},
+	});
+	const tool = harness.tools.get("roles_run");
+	const value = await tool.execute(
+		{ task: "implement it", plan: "Use the existing pattern." },
+		{ agent: AGENT, signal: SIGNAL, callId: "run-fallback" },
+	);
+	assert.equal(value.status, "approved");
+	assert.deepEqual(value.rounds[0]!.worker.route, {
+		provider: "zai",
+		model: "glm-5.3",
+		reasoningEffort: "high",
+	});
+	const worker = value.rounds[0]!.worker;
+	assert.equal("fallback" in worker && worker.fallback, true);
+	assert.equal(value.stages.at(-3)!.route?.provider, "zai");
+	assert.match(value.text, /WORKER \(zai\/glm-5\.3 @high, fallback, completed/);
+	assert.match(value.text, /Fallbacks: worker=zai\/glm-5\.3 @high/);
+	assert.equal(
+		harness.calls.find((call) => call.role === "worker")!.agentOptions
+			?.provider,
+		"zai",
+	);
+});
+
+test("the settings route persists a fallback chain and rejects invalid entries", async () => {
+	const harness = makeHarness();
+	const url = "http://127.0.0.1:62592/plugin-api/role-team/roles";
+	const host = { host: "127.0.0.1:62592" };
+	const post = await handleRolesRoute(
+		harness.ctx,
+		new Request(url, {
+			method: "POST",
+			headers: {
+				...host,
+				"content-type": "application/json",
+				"x-role-team-request": "1",
+			},
+			body: JSON.stringify({
+				role: "worker",
+				action: "fallback",
+				routes: ["zai/glm-5.3:high", "opencode-go/mimo-v2.6-pro"],
+			}),
+		}),
+		{},
+	);
+	assert.equal(post.status, 200);
+	const saved = await post.json();
+	assert.deepEqual(saved.roles.worker.fallbacks, [
+		{ provider: "zai", model: "glm-5.3", reasoningEffort: "high" },
+		{ provider: "opencode-go", model: "mimo-v2.6-pro" },
+	]);
+	assert.deepEqual(harness.entry.options.config.fallbacks, {
+		worker: [
+			{ provider: "zai", model: "glm-5.3", reasoningEffort: "high" },
+			{ provider: "opencode-go", model: "mimo-v2.6-pro" },
+		],
+	});
+	const invalid = await handleRolesRoute(
+		harness.ctx,
+		new Request(url, {
+			method: "POST",
+			headers: {
+				...host,
+				"content-type": "application/json",
+				"x-role-team-request": "1",
+			},
+			body: JSON.stringify({
+				role: "worker",
+				action: "fallback",
+				routes: ["not-a-route"],
+			}),
+		}),
+		{},
+	);
+	assert.equal(invalid.status, 400);
+	assert.deepEqual(harness.entry.options.config.fallbacks, {
+		worker: [
+			{ provider: "zai", model: "glm-5.3", reasoningEffort: "high" },
+			{ provider: "opencode-go", model: "mimo-v2.6-pro" },
+		],
+	});
 });
 
 test("the settings route rejects cross-site and unknown-role writes", async () => {
@@ -1895,4 +2033,36 @@ test("/role-plan treats multi-word sentences ending in .md as tasks and supports
 	assert.ok(flagPrompt.includes("Focus on backwards compatibility"));
 	assert.ok(flagPrompt.includes("STEPS:\n1. From file"));
 	assert.ok(flagPrompt.includes("<<<PLAN"));
+});
+
+test("the settings GET exposes Cursor and Factory Droid catalogs independently", async () => {
+	const harness = makeHarness({
+		agentRuntime: {
+			async list() {
+				return { runtimes: [{ id: "cursor" }, { id: "droid" }] };
+			},
+			async catalog(runtime: string) {
+				if (runtime === "cursor") throw new Error("Cursor sign-in required");
+				return { models: [{ id: "auto", name: "Auto Model" }] };
+			},
+			async create() {
+				throw new Error("not used");
+			},
+			async *send() {},
+			async close() {},
+		},
+	});
+	const response = await handleRolesRoute(
+		harness.ctx,
+		new Request("http://127.0.0.1:62592/plugin-api/role-team/roles?models=1", {
+			headers: { host: "127.0.0.1:62592" },
+		}),
+		{},
+	);
+	assert.equal(response.status, 200);
+	const body = await response.json();
+	assert.match(body.runtimes.cursor.error, /Cursor sign-in required/);
+	assert.deepEqual(body.runtimes.droid.models, [
+		{ id: "auto", name: "Auto Model" },
+	]);
 });

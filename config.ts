@@ -179,6 +179,17 @@ export function normalizeRoute(
 	if (typeof value === "string") {
 		const text = value.trim();
 		if (text === "" || text.toLowerCase() === "inherit") return { route: null };
+		const runtimeMatch = /^(native|cursor|droid):(.+)$/i.exec(text);
+		if (runtimeMatch) {
+			const runtime = runtimeMatch[1]!.toLowerCase();
+			const body = runtimeMatch[2]!.trim();
+			const inner = normalizeRoute(body);
+			if (inner.error === undefined && inner.route !== null)
+				return { route: { ...inner.route, runtime } };
+			if (runtime !== "native" && !body.includes("/"))
+				return { route: { provider: runtime, model: body, runtime } };
+			return { error: inner.error ?? "a runtime route needs a model" };
+		}
 		const slash = text.indexOf("/");
 		if (slash <= 0 || slash === text.length - 1) {
 			return { error: `"${text}" is not a <provider>/<model> route` };
@@ -255,6 +266,13 @@ export function formatRoute(route: Route | null): string {
 	return `${route.runtime && route.runtime !== "native" ? `${route.runtime}:` : ""}${route.provider}/${route.model}${route.reasoningEffort === undefined ? "" : ` @${route.reasoningEffort}`}`;
 }
 
+/** Format one role's ordered fallback chain for display. */
+export function formatFallbackChain(routes: readonly Route[]): string {
+	return routes.length === 0
+		? "none"
+		: routes.map((route) => formatRoute(route)).join(" -> ");
+}
+
 /** Best-effort model family, used only for independence warnings. */
 export function familyOf(route: Route | null): string | null {
 	if (route === null) return null;
@@ -306,8 +324,27 @@ export function resolveRoleTeamConfig(raw: unknown): RoleTeamConfig {
 		if (typeof value === "string" && value.trim() !== "")
 			prompts[role] = value.trim();
 	}
+	const fallbacksInput = isPlainObject(input.fallbacks) ? input.fallbacks : {};
+	const fallbacks = {} as Record<Role, Route[]>;
+	for (const role of ROLE_NAMES) {
+		const value = fallbacksInput[role];
+		const entries = Array.isArray(value)
+			? value
+			: value === undefined
+				? []
+				: [value];
+		const routes: Route[] = [];
+		for (const entry of entries) {
+			const parsed = normalizeRoute(entry);
+			if (parsed.error !== undefined)
+				problems.push({ role, message: `fallback: ${parsed.error}` });
+			else if (parsed.route !== null) routes.push(parsed.route);
+		}
+		fallbacks[role] = routes;
+	}
 	return {
 		roles,
+		fallbacks,
 		sources,
 		problems,
 		maxRounds: clampInt(input.maxRounds, 1, LIMITS.maxRounds, 3),
@@ -438,6 +475,7 @@ export function roleTeamSnapshot(
 		Role,
 		{
 			route: Route | null;
+			fallbacks: Route[];
 			source: RoleTeamConfig["sources"][Role];
 			family: string | null;
 			problem?: string;
@@ -452,6 +490,7 @@ export function roleTeamSnapshot(
 		const validationError = validationErrors?.[role];
 		roles[role] = {
 			route: route === null ? null : { ...route },
+			fallbacks: config.fallbacks[role].map((item) => ({ ...item })),
 			source: config.sources[role],
 			family: familyOf(route),
 			...(problem === undefined ? {} : { problem: problem.message }),
