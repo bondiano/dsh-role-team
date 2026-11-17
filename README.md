@@ -232,9 +232,10 @@ npm ci
 
 The `prepare` lifecycle builds TypeScript into `dist/`. After editing sources,
 run `npm run build` before reloading the plugin. `npm pack` also builds before
-creating the bundle; the archive includes JavaScript, locales and the license,
-with no runtime npm dependencies. A copied or `link:` directory must include
-its built `dist/`; DSH does not compile this package. The workstation macOS
+creating the bundle; the archive includes JavaScript, locales, documentation,
+and the license, with `xstate` as the runtime state-machine dependency. A copied
+or `link:` directory must include its built `dist/` and production
+`node_modules/`; DSH does not compile this package. The workstation macOS
 installer builds its staged copy automatically; Nix builds it from the npm lockfile.
 
 Install the directory through **Plugins → Add plugin**, or with the plugin
@@ -251,6 +252,11 @@ configuration editor; without it, edit the `role-team` row in
 `cordis.patch.yml` directly.
 
 ## How the loop works
+
+The orchestration, background run lifecycle, fallback chain, and external
+runtime sessions are modeled as explicit XState v5 state machines; see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the layered module layout and
+state diagrams.
 
 1. **PLAN** receives the task verbatim plus optional context and returns a plan
    with four labeled parts: `STEPS` (each naming the exact file or module path

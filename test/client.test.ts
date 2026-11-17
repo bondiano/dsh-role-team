@@ -482,4 +482,29 @@ test("the client half registers settings and foreground/background role tool car
 		},
 	});
 	assert.ok(JSON.stringify(statusInFlight).includes("How is it going?"));
+
+	// Terminal status takes precedence over a stale awaiting_user phase
+	const cancelledAfterWait = Card({
+		toolName: "roles_start",
+		callId: "c10",
+		t: (key) => key,
+		useDisclosure: () => ({ expanded: false, toggle: () => {} }),
+		block: {
+			kind: "tool-result",
+			isError: false,
+			meta: {
+				v: 1,
+				tool: "roles_start",
+				runId: "roles-bg-2",
+				status: "cancelled",
+				phase: "awaiting_user",
+				task: "Stop early",
+			},
+			content: [{ type: "text", text: "Cancelled" }],
+			call: { name: "roles_start", argsRaw: '{"task":"Stop early"}' },
+		},
+	});
+	const cancelledText = JSON.stringify(cancelledAfterWait);
+	assert.ok(cancelledText.includes("cancelled"));
+	assert.ok(!cancelledText.includes("awaitingUser"));
 });

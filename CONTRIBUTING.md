@@ -15,8 +15,12 @@ pinned in `package-lock.json`; update dependencies and the lockfile together.
 
 The TypeScript, Oxlint and Oxfmt settings follow `extensions/omp/cursor`.
 Preserve `strict`, `noUncheckedIndexedAccess` and the promise-handling rules.
-DSH services have structural contracts in `types.ts` and the corresponding
-runtime modules; the extension has no runtime package dependencies.
+The codebase uses a layered `src/` layout (`domain/`, `application/`,
+`adapters/`, `infrastructure/`, `presentation/`) with root compatibility facades
+and explicit XState v5 state machines in `src/domain/machines/`; see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). DSH services have structural
+contracts in `src/domain/types.ts` and the corresponding runtime modules;
+`xstate` is the sole runtime package dependency.
 
 Keep `client.ts` free of top-level imports and exports. DSH loads its compiled
 output as a classic script via `window.__ModuleLoader__`; `moduleDetection:

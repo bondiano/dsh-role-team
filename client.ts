@@ -1570,9 +1570,10 @@ interface Window {
 					if (close) setEditing(null);
 					setNotice(t("saved"));
 				} catch (error) {
+					if (!alive.current) return;
 					setSaveError(messageOf(error));
 				} finally {
-					setSaving(false);
+					if (alive.current) setSaving(false);
 				}
 			};
 
@@ -1598,9 +1599,10 @@ interface Window {
 					setEditing(null);
 					setNotice(t("saved"));
 				} catch (error) {
+					if (!alive.current) return;
 					setSaveError(messageOf(error));
 				} finally {
-					setSaving(false);
+					if (alive.current) setSaving(false);
 				}
 			};
 
@@ -1615,9 +1617,10 @@ interface Window {
 					setEditing(null);
 					setNotice(t("saved"));
 				} catch (error) {
+					if (!alive.current) return;
 					setSaveError(messageOf(error));
 				} finally {
-					setSaving(false);
+					if (alive.current) setSaving(false);
 				}
 			};
 
@@ -1630,18 +1633,30 @@ interface Window {
 					setState((previous) => ({ ...previous, snapshot, status: "ready" }));
 					setNotice(t("saved"));
 				} catch (error) {
+					if (!alive.current) return;
 					setSaveError(messageOf(error));
 				} finally {
-					setSaving(false);
+					if (alive.current) setSaving(false);
 				}
 			};
 
 			const updateLimit = async (
 				key: "maxRounds" | "maxPlanPasses" | "childMaxDepth",
-				value: number,
+				rawValue: string,
+				min: number,
+				max: number,
 			) => {
-				if (typeof api.saveConfig !== "function" || !Number.isInteger(value))
+				const trimmed = rawValue.trim();
+				if (trimmed === "") return;
+				const value = Number(trimmed);
+				if (
+					typeof api.saveConfig !== "function" ||
+					!Number.isInteger(value) ||
+					value < min ||
+					value > max
+				) {
 					return;
+				}
 				setSaving(true);
 				setSaveError(undefined);
 				try {
@@ -1650,9 +1665,10 @@ interface Window {
 					setState((previous) => ({ ...previous, snapshot, status: "ready" }));
 					setNotice(t("saved"));
 				} catch (error) {
+					if (!alive.current) return;
 					setSaveError(messageOf(error));
 				} finally {
-					setSaving(false);
+					if (alive.current) setSaving(false);
 				}
 			};
 
@@ -1740,7 +1756,9 @@ interface Window {
 														) => {
 															void updateLimit(
 																"maxRounds",
-																Number(e.target.value),
+																e.target.value,
+																1,
+																6,
 															);
 														},
 													}),
@@ -1762,7 +1780,9 @@ interface Window {
 																) => {
 																	void updateLimit(
 																		"maxPlanPasses",
-																		Number(e.target.value),
+																		e.target.value,
+																		1,
+																		3,
 																	);
 																},
 															}),
@@ -1785,7 +1805,9 @@ interface Window {
 																) => {
 																	void updateLimit(
 																		"childMaxDepth",
-																		Number(e.target.value),
+																		e.target.value,
+																		0,
+																		8,
 																	);
 																},
 															}),
@@ -1857,7 +1879,7 @@ interface Window {
 				editing === null
 					? null
 					: h(ModelPicker, {
-							key: editing.role,
+							key: `${editing.role}-${editing.fallback ? "fallback" : "primary"}`,
 							role: editing.role,
 							info: snapshot?.roles?.[editing.role],
 							catalog: state.catalog,
@@ -2066,6 +2088,46 @@ interface Window {
 			return run;
 		}
 
+		const STATUS_TO_LOCALE_KEY: Record<string, string> = {
+			running: "running",
+			cancelling: "cancelling",
+			cancelled: "cancelled",
+			failed: "failed",
+			approved: "approved",
+			continued: "continued",
+			unapproved: "notApproved",
+		};
+
+		/** Explicit FSM status projection for a role tool card header pill. */
+		function deriveToolCardStatus({
+			preparing,
+			inFlight,
+			isError,
+			activePhase,
+			verdict,
+			meta,
+		}: {
+			preparing: boolean;
+			inFlight: boolean;
+			isError: boolean;
+			activePhase: unknown;
+			verdict: ClientItem | null;
+			meta: ClientItem | null;
+		}): string {
+			if (preparing) return "preparing";
+			if (isError) return "failed";
+			const metaStatus =
+				meta !== null && typeof meta.status === "string" ? meta.status : "";
+			if (TERMINAL_STATUSES.includes(metaStatus)) {
+				return STATUS_TO_LOCALE_KEY[metaStatus] ?? "finished";
+			}
+			if (activePhase === "awaiting_user") return "awaitingUser";
+			if (inFlight) return "running";
+			if (verdict !== null) return verdict.approved ? "approved" : "changes";
+			if (meta === null) return "finished";
+			return STATUS_TO_LOCALE_KEY[metaStatus] ?? "finished";
+		}
+
 		/** The dedicated chat-timeline card for one role tool call. */
 		function RoleToolRow(props: ClientToolProps) {
 			const { toolName, block, useDisclosure } = props;
@@ -2102,7 +2164,11 @@ interface Window {
 				disclosure.expanded,
 			);
 			const meta =
-				background && live !== null ? { ...storedMeta, ...live } : storedMeta;
+				storedMeta !== null
+					? background && live !== null
+						? { ...storedMeta, ...live }
+						: storedMeta
+					: live;
 			const task =
 				taskOf(block) || (typeof meta?.task === "string" ? meta.task : "");
 			const stages = (
@@ -2137,35 +2203,14 @@ interface Window {
 			).filter(isItem);
 
 			const activePhase = meta?.phase ?? live?.phase;
-			const statusKey = preparing
-				? "preparing"
-				: activePhase === "awaiting_user"
-					? "awaitingUser"
-					: inFlight
-						? "running"
-						: isError
-							? "failed"
-							: verdict !== null
-								? verdict.approved
-									? "approved"
-									: "changes"
-								: meta === null
-									? "finished"
-									: meta.status === "running"
-										? "running"
-										: meta.status === "cancelling"
-											? "cancelling"
-											: meta.status === "cancelled"
-												? "cancelled"
-												: meta.status === "failed"
-													? "failed"
-													: meta.status === "approved"
-														? "approved"
-														: meta.status === "continued"
-															? "continued"
-															: meta.status === "unapproved"
-																? "notApproved"
-																: "finished";
+			const statusKey = deriveToolCardStatus({
+				preparing,
+				inFlight,
+				isError,
+				activePhase,
+				verdict,
+				meta,
+			});
 			const pillClass =
 				statusKey === "approved"
 					? "dsh-rt-pill dsh-rt-pill-ok"
