@@ -1,6 +1,6 @@
 {
 	"name": "@local/dsh-role-team",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"private": true,
 	"type": "module",
 	"description": "Role team for DeepSeek Harness: PLAN, WORKER, ADVISOR and REVIEWER agents with independently configured models and providers, an orchestrated work loop, a Settings → Models role picker, and a /roles command.",
