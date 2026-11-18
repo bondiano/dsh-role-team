@@ -1,0 +1,49 @@
+direction: down
+
+dsh_user: "DSH user\ndesktop app"
+
+mf_timeline_cards: "run timeline cards\n[tool.call.toolview slot]"
+
+mf_model_picker: "ModelPicker\n[settings.models.footer slot]"
+
+role_team_http: "/plugin-api/role-team\n[webServer 3 routes]"
+
+role_team_host: "apply host plugin\n[Cordis, Node.js]"
+
+roles_tools: "roles_ role_ tools\n[tools service]"
+
+roles_commands: "/roles /role-plan\n[commands registry]"
+
+orchestrator: "runRoleTeam\n[PLAN WORKER ADVISOR REVIEWER]"
+
+dag_team_machine: "team-pipeline.machine\n[xstate v5]"
+
+background_runs: "background-runs\n[background-job.machine]"
+
+native_role: "subagents spawn\n[native DSH subagent]"
+
+runtime_role: "agentRuntime session\n[cursor or droid]"
+
+llm_service: "llm service\n[listProviders, listModels]"
+
+config_editor: "configEditor\n[settings persistence]"
+
+dsh_user -> mf_timeline_cards: "watches run cards\ncancels runs"
+dsh_user -> mf_model_picker: "picks model routes\non exhaustion"
+mf_timeline_cards -> role_team_http: "fetch run state and\ncancel action"
+mf_model_picker -> role_team_http: "fetch roles settings\nx-role-team-request"
+role_team_host -> role_team_http: "webServer.register\nauthenticated routes"
+role_team_host -> roles_tools: "registers eight\nteam tools"
+role_team_host -> roles_commands: "registers roles\nand role-plan"
+roles_tools -> orchestrator: "roles_run role_plan\ninvoke pipeline"
+roles_tools -> background_runs: "roles_start spawns\nbackground run"
+roles_commands -> orchestrator: "/roles run starts\nteam pipeline"
+roles_commands -> config_editor: "saves role routes\nand fallbacks"
+background_runs -> orchestrator: "runs team pipeline\nwith abort signal"
+orchestrator -> dag_team_machine: "wires machine actors\nrunPlan runWorker"
+orchestrator -> native_role: "spawns subagents\nfor role calls"
+orchestrator -> runtime_role: "external runtime\nrole sessions"
+orchestrator -> llm_service: "validates routes\nproviders models"
+orchestrator -> dsh_user: "userQuestions for\nexhaustion decisions"
+role_team_http -> background_runs: "run state reads\nand cancel"
+role_team_http -> config_editor: "saveTeamSettings\nsaveRoleRoute"
