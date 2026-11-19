@@ -66,7 +66,11 @@ export const RUN_STATE_ROUTE = "/plugin-api/role-team/run";
 export const PLAN_SESSION_ROUTE = "/plugin-api/role-team/plan-session";
 
 /** Supported agent runtime identifiers for role routes. */
-export const EXTERNAL_RUNTIMES = Object.freeze(["cursor", "droid"] as const);
+export const EXTERNAL_RUNTIMES = Object.freeze([
+	"cursor",
+	"droid",
+	"antigravity",
+] as const);
 
 /** The section that tells the lead what the team is for. */
 export const ROLE_GUIDANCE = `Role team (PLAN -> WORKER -> ADVISOR -> REVIEWER) is available. Prefer \`roles_start\` for substantial work: it starts the pipeline in the background so you remain available to the user. PLAN drafts a plan, ADVISOR audits it before WORKER implements, then audits each attempt; REVIEWER is the final gate. Pass the task verbatim and all relevant context: children do not see this conversation. On progress questions such as “чё там”, “че там”, “как там” or “how is it going”, call \`roles_status\` and report the observed stage, child activity and blockers. Its optional question argument asks the active native child for clarification; inbox acceptance is not an answer. Never launch another run for a progress question. Use \`roles_cancel\` to stop. \`roles_run\` waits for the final report when foreground execution is explicitly needed; \`role_*\` tools run single roles. Never start REVIEWER before WORKER reports completion. The user can use \`/roles run <task>\` here or \`/role-plan <task or plan.md>\` to open a dedicated conversational orchestrator session. Role routes are configured with \`/roles\` or Settings → Models. Background results are kept in memory until plugin reload; use runId to select an older run.`;
@@ -198,7 +202,7 @@ export function normalizeRoute(
 	if (typeof value === "string") {
 		const text = value.trim();
 		if (text === "" || text.toLowerCase() === "inherit") return { route: null };
-		const runtimeMatch = /^(native|cursor|droid):(.+)$/i.exec(text);
+		const runtimeMatch = /^(native|cursor|droid|antigravity):(.+)$/i.exec(text);
 		if (runtimeMatch) {
 			const runtime = runtimeMatch[1]!.toLowerCase();
 			const body = runtimeMatch[2]!.trim();
@@ -245,9 +249,11 @@ export function normalizeRoute(
 		if (
 			runtime !== undefined &&
 			(typeof runtime !== "string" ||
-				!["native", "cursor", "droid"].includes(runtime))
+				!["native", "cursor", "droid", "antigravity"].includes(
+					runtime,
+				))
 		) {
-			return { error: "runtime must be native, cursor, or droid" };
+			return { error: "runtime must be native, cursor, droid, or antigravity" };
 		}
 		const provider =
 			typeof value.provider === "string"

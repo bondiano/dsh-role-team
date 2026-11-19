@@ -842,7 +842,7 @@ window.__ModuleLoader__.load({
                     if (next === "native" && !selected)
                         setModel(group?.models?.[0]?.id ?? "");
                 },
-            }, h("option", { value: "native" }, t("runtimeNative")), h("option", { value: "cursor" }, "Cursor"), h("option", { value: "droid" }, "Factory Droid"))), h("div", { className: "dsh-rt-dialog-body" }, fallback
+            }, h("option", { value: "native" }, t("runtimeNative")), h("option", { value: "cursor" }, "Cursor"), h("option", { value: "droid" }, "Factory Droid"), h("option", { value: "antigravity" }, "Antigravity"))), h("div", { className: "dsh-rt-dialog-body" }, fallback
                 ? h("div", { className: "dsh-rt-fallbacks" }, h("span", { className: "dsh-rt-effort-label" }, t("fallbacks")), (info?.fallbacks ?? []).length === 0
                     ? h("span", { className: "dsh-rt-note" }, t("noFallbacks"))
                     : (info?.fallbacks ?? []).map((route, index) => h("span", {

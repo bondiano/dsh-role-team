@@ -1191,6 +1191,7 @@ interface Window {
 						h("option", { value: "native" }, t("runtimeNative")),
 						h("option", { value: "cursor" }, "Cursor"),
 						h("option", { value: "droid" }, "Factory Droid"),
+						h("option", { value: "antigravity" }, "Antigravity"),
 					),
 				),
 				h(

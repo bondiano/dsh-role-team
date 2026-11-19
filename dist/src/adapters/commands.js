@@ -154,7 +154,7 @@ async function modelsReport(ctx, providerArg) {
         }
     }
     lines.push("");
-    lines.push("Use /roles models <provider|runtime> to list model ids; runtime routes use cursor:<model> or droid:<model>.");
+    lines.push("Use /roles models <provider|runtime> to list model ids; runtime routes use cursor:<model>, droid:<model> or antigravity:<model>.");
     return lines.join("\n");
 }
 function parseRoleName(token, usage) {
